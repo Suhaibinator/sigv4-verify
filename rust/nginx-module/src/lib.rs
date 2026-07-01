@@ -6,10 +6,18 @@
 //! only the NGINX FFI boundary: module registration, directive glue, reading
 //! request structures, returning status codes, and variable plumbing.
 //!
-//! Panic safety: every FFI entry point wraps its Rust body in
-//! `std::panic::catch_unwind`, so panics never unwind into NGINX C frames
-//! even when the crate is built with `panic = "unwind"`. Release builds
-//! additionally use `panic = "abort"`.
+//! Panic safety: the access-phase handler wraps its Rust body in
+//! `std::panic::catch_unwind` so that, in a `panic = "unwind"` build (debug and
+//! test), a panic is converted to a 500 instead of unwinding into NGINX C
+//! frames (which would be UB). Release builds set `panic = "abort"` (see the
+//! workspace `Cargo.toml`): there `catch_unwind` cannot run its handler, so an
+//! unexpected panic aborts the worker process (fail-stop) rather than
+//! unwinding — still sound, but not a graceful 500. The reachable panic points
+//! on the request path are guarded by the invariants noted at each call site
+//! and the verifier core is fuzzed; the abort path is a backstop, not an
+//! expected outcome. Note that the variable getters and pre/post-configuration
+//! hooks are not individually wrapped, so any panic added to them must keep
+//! this same discipline.
 
 use std::ffi::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -552,9 +560,15 @@ fn alloc_ctx(request: &mut Request) -> Option<&'static mut RequestCtx> {
 }
 
 fn handle_request(request: &mut Request) -> Status {
-    let mode = Module::location_conf(request)
-        .map(|loc| loc.mode)
-        .unwrap_or(Mode::Unset);
+    // NGINX always initializes the location conf for a loaded module, so a
+    // missing one indicates an internal inconsistency. Fail closed (500) rather
+    // than defaulting to `Unset`, which would pass the request through
+    // unverified — the one asymmetry where an unexpected internal state would
+    // otherwise open instead of close.
+    let Some(loc) = Module::location_conf(request) else {
+        return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+    };
+    let mode = loc.mode;
 
     let Some(ctx) = alloc_ctx(request) else {
         return HTTPStatus::INTERNAL_SERVER_ERROR.into();
@@ -565,14 +579,25 @@ fn handle_request(request: &mut Request) -> Status {
         return Status::NGX_DECLINED;
     }
 
-    let Some(verifier) = Module::main_conf(request).and_then(|main| main.verifier.as_ref()) else {
-        // init_main_conf rejects enabled configs without credentials, so this
-        // is unreachable in a loaded config; fail closed regardless.
-        ctx.result = RESULT_ERROR;
-        ctx.reason = REASON_NOT_CONFIGURED;
-        return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+    // init_main_conf rejects enabled configs without credentials, so a missing
+    // main conf or verifier is unreachable in a loaded config; fail closed
+    // regardless. Bind `main` once and read the verifier from it (no second
+    // lookup, no `expect` panic point on the request path).
+    let (main, verifier) = match Module::main_conf(request) {
+        Some(main) => match main.verifier.as_ref() {
+            Some(verifier) => (main, verifier),
+            None => {
+                ctx.result = RESULT_ERROR;
+                ctx.reason = REASON_NOT_CONFIGURED;
+                return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+            }
+        },
+        None => {
+            ctx.result = RESULT_ERROR;
+            ctx.reason = REASON_NOT_CONFIGURED;
+            return HTTPStatus::INTERNAL_SERVER_ERROR.into();
+        }
     };
-    let main = Module::main_conf(request).expect("main conf exists: verifier was read from it");
 
     let started = Instant::now();
 

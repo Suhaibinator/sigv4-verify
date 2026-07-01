@@ -190,22 +190,35 @@ Module vs sidecar (identical request outcomes, so directly comparable):
   includes both the nginx worker and the verifier process).
 - **Latency lower across the whole distribution**: p50 −19%, p90 −20%,
   p99 −22%.
-- The module stack outperforms even the *unverified* baseline on this mix:
-  35% of its traffic short-circuits to small 403s in the access phase without
-  touching the filesystem. Under garbage/attack traffic the module gets
-  *cheaper*, which is a useful DoS-resilience property.
+- On this mix the module stack also posts higher RPS than the *unverified*
+  baseline — but that is **not** an apples-to-apples "verification is free" claim
+  and should not be read as one. The baseline serves all 500 corpus URLs from
+  the filesystem, whereas the module short-circuits 35% of them to small 403s in
+  the access phase without touching the origin, so it is simply doing less work
+  per request on this reject-heavy corpus. The honest same-work comparison is
+  the all-200 single-URL first pass above, where the module is ~3.5% *slower*
+  than baseline (its true verification overhead). The useful takeaway here is a
+  DoS-resilience property: under garbage/attack traffic the module gets
+  *cheaper* rather than more expensive, because rejects never reach the origin.
+  (The two result sections also use different network topologies — host
+  port-forwarding in the first pass vs in-network load generation here — so
+  their absolute RPS/latency numbers are not directly comparable across
+  sections; only the within-section stack-to-stack deltas are.)
 
 ### Go GC behavior under the barrage
 
 The sidecar verifier ran **2,385 GC cycles in the 60 s window** — one every
 ~25 ms, i.e. roughly every 300 requests — because its live heap is ~1 MB
 against a 4 MB goal and per-request allocations churn straight through it.
-Individual pauses are small (concurrent mark ~1–2 ms, sub-100 µs STW phases),
-so the impact is not dramatic tail spikes but a steady tax: each cycle costs
-~5–14 ms of CPU across threads, adding up to tens of seconds of CPU per
-minute, which is a large share of the verifier process's 0.48 cores. The Rust
-module has no GC; its ~47 allocations/request are deterministic pool/heap
-operations, which is visible in its flatter distribution (p99 only 1.3× p50).
+Each cycle on a ~1 MB live heap is individually cheap (concurrent mark plus
+sub-100 µs STW phases), so the effect is a steady background tax rather than
+dramatic tail spikes; we did not isolate the GC's exact CPU share from the
+verifier process's 0.48 cores, so no per-cycle CPU figure is claimed here. Note
+also that 2,385 cycles is a function of the *default* `GOGC=100` on a tiny live
+heap: raising `GOGC` or setting `GOMEMLIMIT` would cut the cycle count
+substantially, so this is a default-tuning artifact, not an inherent floor. The
+Rust module has no GC; its ~47 allocations/request are deterministic pool/heap
+operations, visible in its flatter distribution (p99 only 1.3× p50).
 
 Same caveats as above: Docker Desktop VM on macOS, one nginx worker per
 stack; re-run on Linux for production sign-off. Regenerate the corpus and

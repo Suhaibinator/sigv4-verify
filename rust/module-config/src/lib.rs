@@ -251,9 +251,23 @@ impl CredentialDirective {
                     }
                     directive.max_expires = Some(parse_duration(value)?);
                 }
-                "allowed_host" => directive.allowed_hosts.push(value.to_string()),
-                "allowed_method" => directive.allowed_methods.push(value.to_string()),
-                "allowed_prefix" => directive.allowed_prefixes.push(value.to_string()),
+                "allowed_host" | "allowed_method" | "allowed_prefix" => {
+                    // A whitespace-only value is almost certainly a quoting or
+                    // templating mistake. Reject it at parse time (failing
+                    // `nginx -t`) rather than letting it flow downstream: an
+                    // all-whitespace host normalizes to the empty string in the
+                    // verifier, which would be dropped and collapse the host
+                    // allowlist to "allow any host" — the exact fail-open this
+                    // strict-allowlist config layer exists to prevent.
+                    if value.trim().is_empty() {
+                        return Err(DirectiveError::new(format!("{key:?} has a blank value")));
+                    }
+                    match key {
+                        "allowed_host" => directive.allowed_hosts.push(value.to_string()),
+                        "allowed_method" => directive.allowed_methods.push(value.to_string()),
+                        _ => directive.allowed_prefixes.push(value.to_string()),
+                    }
+                }
                 other => {
                     return Err(DirectiveError::new(format!("unknown argument {other:?}")));
                 }
@@ -441,6 +455,26 @@ mod tests {
         assert!(credential.allowed_hosts.is_empty());
         assert!(credential.allowed_methods.is_empty());
         assert!(credential.allowed_prefixes.is_empty());
+    }
+
+    #[test]
+    fn rejects_blank_policy_list_values() {
+        // A whitespace-only list value must fail `nginx -t`. Otherwise an
+        // all-whitespace `allowed_host` would normalize to the empty string in
+        // the verifier, be dropped, and collapse the host allowlist to
+        // "allow any host" — a fail-open. Methods/prefixes already fail closed
+        // downstream, but we reject blanks uniformly at the config layer where
+        // the strict-allowlist contract is documented.
+        for key in ["allowed_host", "allowed_method", "allowed_prefix"] {
+            for blank in [" ", "\t", "   "] {
+                let arg = format!("{key}={blank}");
+                let args = ["AKIATEST", "secret_key=local-dev", &arg];
+                assert!(
+                    parse(&args).is_err(),
+                    "expected error for blank {key:?} value {blank:?}"
+                );
+            }
+        }
     }
 
     #[test]
