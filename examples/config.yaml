@@ -1,0 +1,29 @@
+server:
+  network: "tcp"
+  listen: ":8080"
+  # To listen on a Unix domain socket instead:
+  # network: "unix"
+  # listen: "/run/sigv4-verify/sigv4-verify.sock"
+  # socket_mode: "660"
+
+verification:
+  allowed_clock_skew: 5m
+  default_max_expires: 15m
+
+credentials:
+  - access_key: "minio-public-reader"
+    # Prefer secret_key_env for process-level secret injection.
+    secret_key_env: "SIGV4_SECRET_KEY"
+    # Or mount a secret file and use this field instead.
+    # secret_key_file: "/run/secrets/minio-public-reader"
+    enabled: true
+    max_expires: 10m
+    allowed_hosts:
+      - "assets.example.com"
+    allowed_methods:
+      - GET
+      - HEAD
+    # Path-style URLs include the bucket as the first path segment.
+    allowed_prefixes:
+      - "/my-bucket/public/"
+      - "/my-bucket/reports/"
