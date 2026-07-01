@@ -224,7 +224,7 @@ func setCredential(cred *rawCredential, key, value string) error {
 		cred.MaxExpiresSeconds = value
 	default:
 		if isCredentialList(key) {
-			return nil
+			return fmt.Errorf("credential key %q requires a block-style list; inline lists are not supported", key)
 		}
 		return fmt.Errorf("unsupported credential key %q", key)
 	}

@@ -151,6 +151,30 @@ credentials:
 	}
 }
 
+func TestLoadRejectsInlineCredentialList(t *testing.T) {
+	for _, field := range []string{"allowed_hosts", "allowed_methods", "allowed_prefixes"} {
+		t.Run(field, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.yaml")
+			data := []byte(`
+credentials:
+  - access_key: "reader"
+    secret_key: "secret"
+    ` + field + `: ["assets.example.com"]
+`)
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			// An inline flow-style list must be rejected rather than silently dropped,
+			// which would leave the allow-list empty and fail open.
+			if _, err := Load(configPath); err == nil {
+				t.Fatal("Load() error = nil, want inline credential list error")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsUnixNetworkWithoutListen(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
