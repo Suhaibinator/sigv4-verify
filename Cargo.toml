@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "rust/sigv4-verifier",
+    "rust/module-config",
+    "rust/nginx-module",
+]
+exclude = [
+    "rust/sigv4-verifier/fuzz",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/suhaibinator/sigv4-verify"
+
+[profile.release]
+panic = "abort"
+

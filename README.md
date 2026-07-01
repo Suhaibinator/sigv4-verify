@@ -225,6 +225,26 @@ behavior, and fail-closed behavior when the sidecar is unavailable.
 See [docs/poc-e2e.md](docs/poc-e2e.md)
 for the full POC flow and manual presign helper usage.
 
+## Rust NGINX Module
+
+A native Rust NGINX module, `ngx_http_sigv4_verify_module`, verifies the same
+presigned URLs directly in the NGINX access phase, removing the sidecar
+transport hop (`auth_request`, HTTP/TCP/Unix socket) while keeping the verifier
+core memory-safe. It uses the same stable reason strings as the sidecar and adds
+NGINX variables (`$sigv4_verify_result`, `$sigv4_verify_reason`,
+`$sigv4_verify_access_key_hash`, `$sigv4_verify_latency_us`) plus shadow and
+enforce modes.
+
+Status: production evaluation. Roll it out through shadow mode before enforcing,
+and keep the Go sidecar as the rollback path. The main semantic difference is
+that the module requires explicit per-credential policy lists (or explicit
+`allow_any_*` flags), where the sidecar treats an omitted list as allow-all.
+
+See [docs/rust-nginx-module.md](docs/rust-nginx-module.md) for the operator
+guide (build, directives, variables, rollout, security, rollback) and
+[docs/rust-nginx-module-requirements.md](docs/rust-nginx-module-requirements.md)
+for requirements and acceptance criteria.
+
 ## Development
 
 Use Go 1.26.4. The service implementation is intentionally dependency

@@ -25,6 +25,12 @@ profile.cov
 go.work
 go.work.sum
 
+# Rust build output
+/target/
+
+# Rust formatter backups
+*.rs.bk
+
 # env file
 .env
 

@@ -1,0 +1,29 @@
+[package]
+name = "ngx-http-sigv4-verify"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NGINX dynamic module verifying S3/MinIO SigV4 presigned URLs in the access phase"
+publish = false
+
+[lib]
+name = "ngx_http_sigv4_verify_module"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+# The glue crate has no runnable tests: the test binary cannot resolve NGINX
+# symbols outside an nginx process. All logic lives in the safe crates, which
+# are fully tested; NGINX behavior is covered by the Docker e2e suite.
+test = false
+doctest = false
+
+[dependencies]
+ngx = "0.5.1"
+sigv4-module-config = { path = "../module-config" }
+sigv4-verifier = { path = "../sigv4-verifier" }
+
+[features]
+# Build against a vendored copy of the pinned NGINX source. Without this
+# feature, set NGINX_SOURCE_DIR/NGINX_BUILD_DIR to a configured NGINX source
+# tree matching the production binary (see docs/rust-nginx-module.md).
+vendored = ["ngx/vendored"]

@@ -1,0 +1,212 @@
+# Benchmarks
+
+This document covers how to run the benchmarks for the Rust SigV4 verifier core
+and the NGINX module e2e path, the acceptance targets from
+`docs/rust-nginx-module-requirements.md`, and the core-verifier results measured
+so far.
+
+## What is benchmarked
+
+Two layers, matching the requirements doc:
+
+1. **Core verifier (criterion).** Measures `Verifier::verify()` in isolation on
+   pre-generated URIs, with no NGINX, no I/O, and no network. This isolates the
+   Rust hot path and is where allocations-per-request are reported.
+2. **NGINX module e2e (load harness).** Drives a running NGINX endpoint with a
+   mixed valid/invalid corpus and reports wire latency percentiles and
+   throughput. This is where the module is compared against the Go sidecar.
+
+## Running the core benchmark
+
+```sh
+cargo bench -p sigv4-verifier
+```
+
+The harness is `rust/sigv4-verifier/benches/verify.rs` (criterion,
+`harness = false`). It builds each input once, outside the timed loop, and warms
+the per-worker signing-key cache before timing the valid path. Cases:
+
+- `valid_get_warm_cache` — valid GET, signing-key cache hit.
+- `valid_get_high_cardinality_query` — valid GET plus 20 extra high-cardinality
+  query params.
+- `valid_get_long_path` — valid GET with a ~2KB path.
+- `deny_signature_mismatch` — tampered signature.
+- `deny_missing_params` — a required SigV4 param removed.
+- `deny_invalid_path_traversal` — `..` traversal in the path.
+- `deny_expired` — expired presign (verified past its expiry).
+
+A fixed `SystemTime` is used so results are stable across runs.
+
+## Running the allocation report
+
+```sh
+cargo run -p sigv4-verifier --release --example alloc_report
+```
+
+`examples/alloc_report.rs` installs a counting global allocator (an `AtomicU64`
+pair wrapping `System`, defined in the example — no new runtime dependencies)
+and prints allocations and bytes per `verify()` call, averaged over 10k
+iterations after warming the cache, for the valid, signature-mismatch, and
+missing-params scenarios.
+
+## Running the e2e harness
+
+The load harness lives in `scripts/bench/` and measures a *running* endpoint; it
+does not stand up NGINX or the sidecar for you. See `scripts/bench/README.md`
+for the full matrix (Rust module static + proxy_cache, Go sidecar unix socket +
+TCP, mixed traffic, high-cardinality, long paths, reload churn) and reuse the
+container topology in `e2e/nginx_unix_socket_test.go`.
+
+```sh
+# 1. Generate a mixed valid/invalid corpus.
+scripts/bench/gen-urls.sh -n 500 -o /tmp/urls.txt \
+  --host assets.example.test --bucket my-bucket --object public/file.txt \
+  --invalid-ratio 0.2
+
+# 2. Load-test a running endpoint (wrk primary, oha fallback).
+scripts/bench/bench.sh --base http://127.0.0.1:8080 --urls /tmp/urls.txt \
+  --host assets.example.test --duration 30s --connections 64 --threads 4
+```
+
+## Acceptance targets
+
+From `docs/rust-nginx-module-requirements.md` (Performance Requirements). These
+apply to the **NGINX e2e** comparison, not the core-only bench:
+
+- Native module p50 verification latency **≥30% lower** than the Go sidecar over
+  a unix socket in the same NGINX e2e setup.
+- Native module p99 verification latency **≥20% lower** than the Go sidecar over
+  a unix socket in the same NGINX e2e setup.
+- No measurable throughput regression for cached object hits with verification
+  enabled.
+- Stable memory usage under sustained load and reload churn.
+
+Report p50/p90/p99/p999 latency, RPS per worker, CPU per request, allocations
+per request (core bench), worker RSS, and the error/deny-reason distribution.
+
+## Results (Apple Silicon, core-only)
+
+Core-verifier-only. These are **not** the NGINX e2e numbers and are not directly
+comparable to the Go sidecar — the acceptance targets above are defined against
+the NGINX e2e path, which is measured on Linux (TBD). They characterize the Rust
+hot path and its per-request allocations.
+
+- Machine: Apple M4 Max (16 cores), macOS 26.5.2.
+- Toolchain: rustc 1.96.0, `--release`/bench profile (`panic = "abort"`).
+- criterion 0.5, 100 samples/case; the value shown is criterion's point
+  estimate (median of the reported `[lo est hi]` interval).
+
+### Latency per `verify()` call
+
+| Case                                | Latency (point estimate) |
+| ----------------------------------- | ------------------------ |
+| `valid_get_warm_cache`              | 2.82 µs                  |
+| `valid_get_high_cardinality_query`  | 7.12 µs                  |
+| `valid_get_long_path` (~2KB path)   | 10.70 µs                 |
+| `deny_signature_mismatch`           | 2.77 µs                  |
+| `deny_missing_params`               | 1.94 µs                  |
+| `deny_invalid_path_traversal`       | 0.24 µs                  |
+| `deny_expired`                      | 2.68 µs                  |
+
+### Allocations per `verify()` call
+
+| Case                       | Allocations | Bytes  |
+| -------------------------- | ----------- | ------ |
+| `valid_get_warm_cache`     | 47          | 1755   |
+| `deny_signature_mismatch`  | 47          | 1769   |
+| `deny_missing_params`      | 39          | 1207   |
+
+The successful path currently allocates (method/host normalization, the
+owned canonical path/query buffers, signing-key cache lookup keys, and the
+returned `VerifyResult`). The requirements allow heap allocation on the success
+path only if benchmarking proves it negligible; at ~47 small allocations /
+~1.7KB per request these are candidates for reduction (e.g. reusing scratch
+buffers, borrowing where the unsafe boundary allows) before the module is
+declared production-ready. The single-microsecond latencies suggest the
+allocator cost is small in absolute terms, but the count is worth driving down.
+
+### Notes
+
+- Times were collected with other build jobs quiescent; a first noisy run under
+  concurrent compilation showed ~15–25% wider confidence intervals, so treat
+  these as order-of-magnitude, not sub-100ns-precise.
+
+## Results (Docker on Apple Silicon, NGINX e2e, first pass)
+
+First comparative measurement of the full NGINX path, 2026-07-01. Topology
+mirrors the e2e tests: the module image (`build/nginx-module/Dockerfile`,
+nginx 1.28.0 + module, enforce mode) versus the Go sidecar over a unix socket
+behind `auth_request` (official `nginx:1.28.0`, `keepalive 16` upstream),
+versus the same nginx serving the same file with no verification. One nginx
+worker each, same static origin fixture, identical valid presigned GET
+(warm signing-key cache), `hey -z 20s -c 50` after a 5s warmup, all responses
+200.
+
+| Stack                        | RPS   | p50    | p90    | p99     |
+| ---------------------------- | ----- | ------ | ------ | ------- |
+| Baseline (no verification)   | 7426  | 6.7 ms | 7.1 ms | 8.2 ms  |
+| Rust module (in-process)     | 7167  | 7.0 ms | 7.3 ms | 8.1 ms  |
+| Go sidecar (unix socket)     | 6399  | 7.7 ms | 8.6 ms | 10.1 ms |
+
+Verification overhead relative to the unverified baseline:
+
+| Stack       | p50 overhead | p90 overhead | p99 overhead | Throughput cost |
+| ----------- | ------------ | ------------ | ------------ | --------------- |
+| Rust module | +0.3 ms      | +0.2 ms      | ≈0 (noise)   | −3.5%           |
+| Go sidecar  | +1.0 ms      | +1.5 ms      | +1.9 ms      | −13.8%          |
+
+Against the acceptance targets (verification latency vs the sidecar): the
+module's added p50 verification latency is ~70% lower and its added p99
+latency is indistinguishable from the unverified baseline — comfortably past
+the ≥30%/≥20% reduction targets in this setup.
+
+Caveats: run under the Docker Desktop VM on macOS (its port forwarding
+dominates the ~6.7 ms absolute baseline), single hot URL, 20 s windows.
+Production sign-off still requires the same matrix on Linux `amd64`/`arm64`
+bare Docker, plus the reload-churn scenario from `scripts/bench/`.
+
+## Results (Docker on Apple Silicon, mixed adversarial barrage, in-network)
+
+Sustained 60 s mixed-load runs with the load generator (wrk, alpine container,
+`-t4 -c64`, `scripts/bench/multi-url.lua`) on the same Docker network as the
+stacks, eliminating host port-forwarding. Corpus: 500 shuffled request lines —
+55% valid GET (unique response-content-* params, warm signing-key cache), 10%
+high-cardinality valid, 5% valid long path (~1 KB key, origin 404), 10%
+tampered signature, 5% expired, 5% unknown access key, 5% prefix denial, 3%
+missing SigV4 param, 2% POST. Expected reject ratio 35%; both verified stacks
+returned exactly 35.0% non-2xx, confirming identical decisions under load.
+Sidecar ran with `GODEBUG=gctrace=1`.
+
+| Stack                      | RPS    | p50     | p90     | p99     | p99.9   | CPU (cores) | RSS      |
+| -------------------------- | ------ | ------- | ------- | ------- | ------- | ----------- | -------- |
+| Baseline (no verification) | 11,682 | 5.45 ms | 5.76 ms | 6.43 ms | 18.5 ms | —           | —        |
+| Rust module (in-process)   | 15,379 | 4.18 ms | 4.71 ms | 5.36 ms | 8.8 ms  | 0.35        | 4.0 MiB  |
+| Go sidecar (unix socket)   | 12,379 | 5.14 ms | 5.86 ms | 6.88 ms | 8.9 ms  | 0.39 + 0.48 | 4.5 + 18 MiB |
+
+Module vs sidecar (identical request outcomes, so directly comparable):
+
+- **Throughput +24%** (15,379 vs 12,379 RPS) at lower CPU.
+- **CPU per request 3.1× lower**: ~23 µs·core vs ~70 µs·core (sidecar total
+  includes both the nginx worker and the verifier process).
+- **Latency lower across the whole distribution**: p50 −19%, p90 −20%,
+  p99 −22%.
+- The module stack outperforms even the *unverified* baseline on this mix:
+  35% of its traffic short-circuits to small 403s in the access phase without
+  touching the filesystem. Under garbage/attack traffic the module gets
+  *cheaper*, which is a useful DoS-resilience property.
+
+### Go GC behavior under the barrage
+
+The sidecar verifier ran **2,385 GC cycles in the 60 s window** — one every
+~25 ms, i.e. roughly every 300 requests — because its live heap is ~1 MB
+against a 4 MB goal and per-request allocations churn straight through it.
+Individual pauses are small (concurrent mark ~1–2 ms, sub-100 µs STW phases),
+so the impact is not dramatic tail spikes but a steady tax: each cycle costs
+~5–14 ms of CPU across threads, adding up to tens of seconds of CPU per
+minute, which is a large share of the verifier process's 0.48 cores. The Rust
+module has no GC; its ~47 allocations/request are deterministic pool/heap
+operations, which is visible in its flatter distribution (p99 only 1.3× p50).
+
+Same caveats as above: Docker Desktop VM on macOS, one nginx worker per
+stack; re-run on Linux for production sign-off. Regenerate the corpus and
+rerun with `scripts/bench/gen-urls.sh` + `scripts/bench/bench.sh`.
