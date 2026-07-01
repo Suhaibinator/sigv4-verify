@@ -103,6 +103,9 @@ jobs:
 
       - name: Fuzz smoke (30s per target)
         working-directory: rust/sigv4-verifier
+        # `cargo +nightly` overrides the repo's rust-toolchain.toml (1.96.0
+        # stable), which would otherwise win over the job default and reject
+        # cargo-fuzz's -Z sanitizer flags.
         run: |
           for target in \
             fuzz_split_uri \
@@ -112,7 +115,7 @@ jobs:
             fuzz_canonical_path \
             fuzz_verify; do
             echo "::group::$target"
-            cargo fuzz run "$target" -- -max_total_time=30
+            cargo +nightly fuzz run "$target" -- -max_total_time=30
             echo "::endgroup::"
           done
 
