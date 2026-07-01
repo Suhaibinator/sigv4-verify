@@ -31,6 +31,23 @@ const (
 )
 
 func TestNginxUnixSocketE2E(t *testing.T) {
+	runNginxE2E(t, transportUnixSocket)
+}
+
+func TestNginxTCPE2E(t *testing.T) {
+	runNginxE2E(t, transportTCP)
+}
+
+type transportMode string
+
+const (
+	transportUnixSocket transportMode = "unix_socket"
+	transportTCP        transportMode = "tcp"
+)
+
+func runNginxE2E(t *testing.T, mode transportMode) {
+	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -44,43 +61,64 @@ func TestNginxUnixSocketE2E(t *testing.T) {
 	writeOriginFixtures(t, originDir)
 
 	configPath := filepath.Join(workDir, "config.yaml")
-	writeFile(t, configPath, []byte(sidecarConfig()))
+	writeFile(t, configPath, []byte(sidecarConfig(mode)))
 
 	nginxPath := filepath.Join(workDir, "nginx.conf")
-	writeFile(t, nginxPath, []byte(nginxConfig()))
+	writeFile(t, nginxPath, []byte(nginxConfig(mode)))
 
 	id := uniqueID()
 	sidecarImage := "sigv4-verify-e2e:" + id
 	sidecarName := "sigv4-verify-e2e-sidecar-" + id
 	nginxName := "sigv4-verify-e2e-nginx-" + id
 	socketVolume := "sigv4-verify-e2e-sock-" + id
+	networkName := "sigv4-verify-e2e-net-" + id
 
-	run(t, ctx, "", "docker", "volume", "create", socketVolume)
-	t.Cleanup(func() { cleanupDocker("volume", "rm", "-f", socketVolume) })
+	if mode == transportUnixSocket {
+		run(t, ctx, "", "docker", "volume", "create", socketVolume)
+		t.Cleanup(func() { cleanupDocker("volume", "rm", "-f", socketVolume) })
+	}
+	if mode == transportTCP {
+		run(t, ctx, "", "docker", "network", "create", networkName)
+		t.Cleanup(func() { cleanupDocker("network", "rm", networkName) })
+	}
 
 	buildSidecarImage(t, ctx, root, workDir, sidecarImage)
 	t.Cleanup(func() { cleanupDocker("image", "rm", "-f", sidecarImage) })
 
-	run(t, ctx, "", "docker", "run", "-d",
+	sidecarArgs := []string{"run", "-d",
 		"--name", sidecarName,
 		"-e", "CONFIG_PATH=/config.yaml",
-		"-v", socketVolume+":/sock",
-		"-v", configPath+":/config.yaml:ro",
-		sidecarImage,
-	)
+		"-v", configPath + ":/config.yaml:ro",
+	}
+	switch mode {
+	case transportUnixSocket:
+		sidecarArgs = append(sidecarArgs, "-v", socketVolume+":/sock")
+	case transportTCP:
+		sidecarArgs = append(sidecarArgs, "--network", networkName, "--network-alias", "sigv4-sidecar")
+	default:
+		t.Fatalf("unsupported transport mode %q", mode)
+	}
+	sidecarArgs = append(sidecarArgs, sidecarImage)
+	run(t, ctx, "", "docker", sidecarArgs...)
 	t.Cleanup(func() { cleanupDocker("rm", "-f", sidecarName) })
 	dumpLogsOnFailure(t, sidecarName)
 
 	port := freePort(t)
 	nginxImage := getenvDefault("E2E_NGINX_IMAGE", "nginx:1.27-alpine")
-	run(t, ctx, "", "docker", "run", "-d",
+	nginxArgs := []string{"run", "-d",
 		"--name", nginxName,
 		"-p", fmt.Sprintf("127.0.0.1:%d:8080", port),
-		"-v", socketVolume+":/sock",
-		"-v", nginxPath+":/etc/nginx/nginx.conf:ro",
-		"-v", originDir+":/usr/share/nginx/html:ro",
-		nginxImage,
-	)
+		"-v", nginxPath + ":/etc/nginx/nginx.conf:ro",
+		"-v", originDir + ":/usr/share/nginx/html:ro",
+	}
+	switch mode {
+	case transportUnixSocket:
+		nginxArgs = append(nginxArgs, "-v", socketVolume+":/sock")
+	case transportTCP:
+		nginxArgs = append(nginxArgs, "--network", networkName)
+	}
+	nginxArgs = append(nginxArgs, nginxImage)
+	run(t, ctx, "", "docker", nginxArgs...)
 	t.Cleanup(func() { cleanupDocker("rm", "-f", nginxName) })
 	dumpLogsOnFailure(t, nginxName)
 
@@ -259,12 +297,19 @@ func (p presigner) presign(t *testing.T, method, object string, expiry time.Dura
 	return u.RequestURI()
 }
 
-func sidecarConfig() string {
-	return fmt.Sprintf(`server:
+func sidecarConfig(mode transportMode) string {
+	server := `server:
+  network: "tcp"
+  listen: ":8080"
+`
+	if mode == transportUnixSocket {
+		server = `server:
   network: "unix"
   listen: "/sock/sigv4-verify.sock"
   socket_mode: "666"
-  read_header_timeout: 1s
+`
+	}
+	return fmt.Sprintf(`%s  read_header_timeout: 1s
   read_timeout: 2s
   write_timeout: 2s
   idle_timeout: 30s
@@ -288,11 +333,15 @@ credentials:
       - HEAD
     allowed_prefixes:
       - "/my-bucket/public/"
-`, accessKey, secretKey, publicHost)
+`, server, accessKey, secretKey, publicHost)
 }
 
-func nginxConfig() string {
-	return `worker_processes 1;
+func nginxConfig(mode transportMode) string {
+	upstreamServer := "sigv4-sidecar:8080"
+	if mode == transportUnixSocket {
+		upstreamServer = "unix:/sock/sigv4-verify.sock"
+	}
+	return fmt.Sprintf(`worker_processes 1;
 
 events {
     worker_connections 1024;
@@ -303,7 +352,7 @@ http {
     error_log /dev/stderr notice;
 
     upstream sigv4_verify {
-        server unix:/sock/sigv4-verify.sock;
+        server %s;
         keepalive 16;
     }
 
@@ -351,7 +400,7 @@ http {
         }
     }
 }
-`
+`, upstreamServer)
 }
 
 func buildSidecarImage(t *testing.T, ctx context.Context, root, workDir, image string) {

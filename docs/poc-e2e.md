@@ -3,18 +3,20 @@
 This POC proves the complete request path:
 
 1. Build the local `sigv4-verify` sidecar as a tiny Linux container image.
-2. Start the sidecar with `NETWORK=unix` through YAML config.
+2. Start the sidecar with either `NETWORK=unix` or `NETWORK=tcp` through YAML
+   config.
 3. Start an ephemeral `nginx:1.27-alpine` container.
-4. Share a Docker volume between the two containers at `/sock`.
+4. For Unix sockets, share a Docker volume between the two containers at
+   `/sock`. For TCP, place both containers on an isolated Docker network.
 5. Configure NGINX `auth_request` to call `http://sigv4_verify/verify` over
-   `unix:/sock/sigv4-verify.sock`.
+   `unix:/sock/sigv4-verify.sock` or `sigv4-sidecar:8080`.
 6. Generate real MinIO-compatible presigned URLs in Go.
 7. Send requests through NGINX and verify allow, deny, and fail-closed behavior.
 
 Run it with:
 
 ```sh
-go test -tags=e2e ./e2e -run TestNginxUnixSocketE2E -count=1 -v
+go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v
 ```
 
 Prerequisites:
@@ -26,14 +28,14 @@ Prerequisites:
 Useful overrides:
 
 ```sh
-E2E_NGINX_IMAGE=nginx:alpine go test -tags=e2e ./e2e -count=1 -v
-E2E_GOARCH=amd64 go test -tags=e2e ./e2e -count=1 -v
+E2E_NGINX_IMAGE=nginx:alpine go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v
+E2E_GOARCH=amd64 go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v
 ```
 
 Use `-count=1` for this POC. The test depends on external Docker daemon state,
 and normal Go test caching can otherwise replay an old skipped result.
 
-The e2e harness covers:
+The e2e harness runs the same case matrix for Unix socket and TCP transport:
 
 - Valid presigned `GET` through NGINX returns `200`.
 - Valid presigned `HEAD` through NGINX returns `200` with no body.

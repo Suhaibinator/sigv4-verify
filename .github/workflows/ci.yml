@@ -37,7 +37,7 @@ jobs:
         run: go build ./cmd/sigv4-verify
 
   e2e:
-    name: NGINX Unix Socket E2E
+    name: NGINX Transport E2E
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -52,5 +52,5 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Run NGINX Unix socket e2e
-        run: go test -tags=e2e ./e2e -run TestNginxUnixSocketE2E -count=1 -v
+      - name: Run NGINX transport e2e
+        run: go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v

@@ -206,14 +206,15 @@ for a complete NGINX example.
 ## End-to-End POC
 
 There is an opt-in Docker POC that exercises the full path: a sidecar
-container listening on a Unix socket, an ephemeral NGINX container using
-`auth_request` over that socket, real MinIO-compatible presigned URLs generated
-in Go, and protected content served only after verification.
+container, an ephemeral NGINX container using `auth_request`, real
+MinIO-compatible presigned URLs generated in Go, and protected content served
+only after verification. The POC runs both sidecar transports: Unix socket and
+TCP.
 
 Run it with Docker available:
 
 ```sh
-go test -tags=e2e ./e2e -run TestNginxUnixSocketE2E -count=1 -v
+go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v
 ```
 
 The test covers valid `GET`/`HEAD`, origin misses after valid auth, encoded
@@ -241,5 +242,5 @@ go test -race ./...
 go vet ./...
 go build ./cmd/sigv4-verify
 go test ./internal/verifier -run '^$' -bench BenchmarkVerifierVerifyValid -benchmem
-go test -tags=e2e ./e2e -run TestNginxUnixSocketE2E -count=1 -v
+go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v
 ```
