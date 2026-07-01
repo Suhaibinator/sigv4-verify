@@ -75,7 +75,14 @@ func TestListenUnixRemovesStaleSocket(t *testing.T) {
 
 func shortTempSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/private/tmp", "sigv4-")
+	// Unix socket paths are limited to ~108 bytes, so use a short base dir
+	// rather than the (often long) default TMPDIR. /tmp is short and exists on
+	// both Linux and macOS; fall back to the default temp dir if it is absent.
+	base := "/tmp"
+	if _, err := os.Stat(base); err != nil {
+		base = ""
+	}
+	dir, err := os.MkdirTemp(base, "sigv4-")
 	if err != nil {
 		t.Fatalf("create temp dir: %v", err)
 	}
