@@ -1,4 +1,5 @@
 use ring::{digest, hmac};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -120,34 +121,52 @@ struct SigningKeyCacheEntry {
     key: [u8; digest::SHA256_OUTPUT_LEN],
 }
 
-struct CredentialScope {
-    access_key: String,
-    date: String,
-    region: String,
-    service: String,
-    terminal: String,
-    scope: String,
+struct CredentialScope<'a> {
+    access_key: &'a str,
+    date: &'a str,
+    region: &'a str,
+    service: &'a str,
+    terminal: &'a str,
+    scope: &'a str,
 }
 
-struct ParsedAmzDate {
-    date: String,
+struct ParsedAmzDate<'a> {
+    date: &'a str,
     epoch_seconds: i64,
 }
 
-#[derive(Default)]
-struct SigV4Query {
-    algorithm: String,
+struct SigV4Query<'a> {
+    algorithm: Cow<'a, str>,
     algorithm_count: usize,
-    credential: String,
+    credential: Cow<'a, str>,
     credential_count: usize,
-    date: String,
+    date: Cow<'a, str>,
     date_count: usize,
-    expires: String,
+    expires: Cow<'a, str>,
     expires_count: usize,
-    signed_headers: String,
+    signed_headers: Cow<'a, str>,
     signed_headers_count: usize,
-    signature: String,
+    signature: Cow<'a, str>,
     signature_count: usize,
+}
+
+impl Default for SigV4Query<'_> {
+    fn default() -> Self {
+        Self {
+            algorithm: Cow::Borrowed(""),
+            algorithm_count: 0,
+            credential: Cow::Borrowed(""),
+            credential_count: 0,
+            date: Cow::Borrowed(""),
+            date_count: 0,
+            expires: Cow::Borrowed(""),
+            expires_count: 0,
+            signed_headers: Cow::Borrowed(""),
+            signed_headers_count: 0,
+            signature: Cow::Borrowed(""),
+            signature_count: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,12 +203,12 @@ impl Verifier {
         host: &str,
         now: SystemTime,
     ) -> VerifyResult {
-        let method = method.trim().to_ascii_uppercase();
-        let host = host.trim().to_ascii_lowercase();
+        let method = ascii_upper_cow(method.trim());
+        let host = ascii_lower_cow(host.trim());
         if method.is_empty() || raw_uri.is_empty() || host.is_empty() {
             return deny(REASON_MISSING_METADATA, Vec::new(), "");
         }
-        if !self.state.supported_methods.contains(&method) {
+        if !self.state.supported_methods.contains(method.as_ref()) {
             let path = split_original_uri(raw_uri)
                 .map(|(path, _)| path.to_vec())
                 .unwrap_or_default();
@@ -226,7 +245,7 @@ impl Verifier {
             return deny(
                 REASON_INVALID_CREDENTIAL_SCOPE,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         }
 
@@ -236,14 +255,14 @@ impl Verifier {
             return deny(
                 REASON_MISSING_QUERY_PARAM,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         };
         if signed_headers != "host" {
             return deny(
                 REASON_UNSUPPORTED_SIGNED_HEADER,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         }
 
@@ -251,7 +270,7 @@ impl Verifier {
             return deny(
                 REASON_MISSING_QUERY_PARAM,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         };
         let parsed_date = match parse_amz_date(amz_date) {
@@ -260,7 +279,7 @@ impl Verifier {
                 return deny(
                     REASON_INVALID_CREDENTIAL_SCOPE,
                     path,
-                    &hash_access_key(&scope.access_key),
+                    &hash_access_key(scope.access_key),
                 );
             }
         };
@@ -270,21 +289,21 @@ impl Verifier {
             return deny(
                 REASON_MISSING_QUERY_PARAM,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         };
         let Ok(expires_seconds) = expires_value.parse::<u64>() else {
             return deny(
                 REASON_INVALID_EXPIRY,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         };
         if expires_seconds == 0 || expires_seconds > MAX_SIGV4_EXPIRES_SECS {
             return deny(
                 REASON_INVALID_EXPIRY,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         }
 
@@ -292,15 +311,15 @@ impl Verifier {
             return deny(
                 REASON_MISSING_QUERY_PARAM,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         }
 
-        let Some(cred) = self.state.credentials.get(&scope.access_key) else {
+        let Some(cred) = self.state.credentials.get(scope.access_key) else {
             return deny(
                 REASON_UNKNOWN_ACCESS_KEY,
                 path,
-                &hash_access_key(&scope.access_key),
+                &hash_access_key(scope.access_key),
             );
         };
         let access_key_hash = cred.access_key_hash.clone();
@@ -335,11 +354,11 @@ impl Verifier {
             hash_canonical_request(&method, &canonical_path, &canonical_query_string, &host);
         let expected = sign(
             cred,
-            &scope.date,
-            &scope.region,
-            &scope.service,
+            scope.date,
+            scope.region,
+            scope.service,
             amz_date,
-            &scope.scope,
+            scope.scope,
             canonical_hash,
         );
 
@@ -480,6 +499,22 @@ fn compile_credential(
     })
 }
 
+fn ascii_upper_cow(value: &str) -> Cow<'_, str> {
+    if value.bytes().any(|b| b.is_ascii_lowercase()) {
+        Cow::Owned(value.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+fn ascii_lower_cow(value: &str) -> Cow<'_, str> {
+    if value.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(value.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn normalize_method(method: &str) -> Result<String, ConfigError> {
     let method = method.trim().to_ascii_uppercase();
     match method.as_str() {
@@ -502,28 +537,39 @@ fn normalize_host(host: &str) -> Result<String, ConfigError> {
     Ok(host)
 }
 
-fn parse_credential_scope(value: &str) -> Result<CredentialScope, ConfigError> {
-    let parts: Vec<_> = value.split('/').collect();
-    if parts.len() != 5 {
-        return Err(ConfigError::new("invalid credential scope"));
-    }
-    if parts[0].is_empty()
-        || parts[2].is_empty()
-        || parts[3].is_empty()
-        || parts[4].is_empty()
-        || parts[1].len() != 8
-        || !parts[1].bytes().all(|b| b.is_ascii_digit())
+fn parse_credential_scope(value: &str) -> Result<CredentialScope<'_>, UriError> {
+    let mut parts = value.split('/');
+    let ((Some(access_key), Some(date), Some(region), Some(service), Some(terminal)), None) = (
+        (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ),
+        parts.next(),
+    ) else {
+        return Err(UriError);
+    };
+    if access_key.is_empty()
+        || region.is_empty()
+        || service.is_empty()
+        || terminal.is_empty()
+        || date.len() != 8
+        || !date.bytes().all(|b| b.is_ascii_digit())
     {
-        return Err(ConfigError::new("invalid credential scope"));
+        return Err(UriError);
     }
 
     Ok(CredentialScope {
-        access_key: parts[0].to_string(),
-        date: parts[1].to_string(),
-        region: parts[2].to_string(),
-        service: parts[3].to_string(),
-        terminal: parts[4].to_string(),
-        scope: parts[1..].join("/"),
+        access_key,
+        date,
+        region,
+        service,
+        terminal,
+        // Everything after the first '/'; identical to re-joining the four
+        // trailing components since they were split on '/'.
+        scope: &value[access_key.len() + 1..],
     })
 }
 
@@ -599,9 +645,9 @@ fn validate_raw_path(path: &[u8]) -> Result<(), UriError> {
     Ok(())
 }
 
-fn canonical_uri_from_valid_path(raw_path: &[u8]) -> Vec<u8> {
+fn canonical_uri_from_valid_path(raw_path: &[u8]) -> Cow<'_, [u8]> {
     if is_canonical_path(raw_path) {
-        return raw_path.to_vec();
+        return Cow::Borrowed(raw_path);
     }
     let mut out = Vec::with_capacity(raw_path.len() + 8);
     let mut i = 0;
@@ -627,7 +673,7 @@ fn canonical_uri_from_valid_path(raw_path: &[u8]) -> Vec<u8> {
             i += 1;
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 fn is_canonical_path(raw_path: &[u8]) -> bool {
@@ -653,8 +699,8 @@ fn is_canonical_path(raw_path: &[u8]) -> bool {
     true
 }
 
-fn canonical_query(raw_query: &[u8]) -> Result<(Vec<u8>, SigV4Query), UriError> {
-    let mut values = SigV4Query::default();
+fn canonical_query(raw_query: &[u8]) -> Result<(Vec<u8>, SigV4Query<'_>), UriError> {
+    let mut values: SigV4Query<'_> = SigV4Query::default();
     if raw_query.is_empty() {
         return Ok((Vec::new(), values));
     }
@@ -688,7 +734,7 @@ fn canonical_query(raw_query: &[u8]) -> Result<(Vec<u8>, SigV4Query), UriError> 
             return Err(UriError);
         }
 
-        if decoded_name == b"X-Amz-Signature" {
+        if decoded_name.as_ref() == b"X-Amz-Signature" {
             let (_, decoded_value) = canonicalize_query_component(value_raw, true)?;
             values.set(
                 &decoded_name,
@@ -713,12 +759,19 @@ fn canonical_query(raw_query: &[u8]) -> Result<(Vec<u8>, SigV4Query), UriError> 
         start = end + 1;
     }
 
-    params.sort_by(|a, b| match a.name.cmp(&b.name) {
+    // Ties are byte-identical under this comparator (name and value both
+    // compare equal), so an unstable sort is observationally identical to a
+    // stable one and avoids the stable sort's auxiliary allocation.
+    params.sort_unstable_by(|a, b| match a.name.cmp(&b.name) {
         std::cmp::Ordering::Equal => a.value.cmp(&b.value),
         ordering => ordering,
     });
 
-    let mut out = Vec::new();
+    let capacity = params
+        .iter()
+        .map(|param| param.name.len() + param.value.len() + 2)
+        .sum();
+    let mut out = Vec::with_capacity(capacity);
     for (idx, param) in params.iter().enumerate() {
         if idx > 0 {
             out.push(b'&');
@@ -730,14 +783,19 @@ fn canonical_query(raw_query: &[u8]) -> Result<(Vec<u8>, SigV4Query), UriError> 
     Ok((out, values))
 }
 
-struct CanonicalQueryParam {
-    name: Vec<u8>,
-    value: Vec<u8>,
+struct CanonicalQueryParam<'a> {
+    name: Cow<'a, [u8]>,
+    value: Cow<'a, [u8]>,
 }
 
-impl SigV4Query {
-    fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), UriError> {
-        let value = String::from_utf8(value).map_err(|_| UriError)?;
+impl<'a> SigV4Query<'a> {
+    fn set(&mut self, name: &[u8], value: Cow<'a, [u8]>) -> Result<(), UriError> {
+        let value: Cow<'a, str> = match value {
+            Cow::Borrowed(bytes) => {
+                Cow::Borrowed(std::str::from_utf8(bytes).map_err(|_| UriError)?)
+            }
+            Cow::Owned(bytes) => Cow::Owned(String::from_utf8(bytes).map_err(|_| UriError)?),
+        };
         match name {
             b"X-Amz-Algorithm" => {
                 self.algorithm = value;
@@ -785,21 +843,28 @@ fn single_known_query_value(value: &str, count: usize) -> Option<&str> {
     if count == 1 { Some(value) } else { None }
 }
 
+/// A canonically re-encoded query component and, when requested, its
+/// percent-decoded form. Both borrow the input when it is already canonical.
+type QueryComponent<'a> = (Cow<'a, [u8]>, Option<Cow<'a, [u8]>>);
+
 fn canonicalize_query_component(
     raw: &[u8],
     want_decoded: bool,
-) -> Result<(Vec<u8>, Option<Vec<u8>>), UriError> {
+) -> Result<QueryComponent<'_>, UriError> {
     let slow = query_component_needs_slow_path(raw)?;
     if !slow {
-        return Ok((raw.to_vec(), want_decoded.then(|| raw.to_vec())));
+        return Ok((
+            Cow::Borrowed(raw),
+            want_decoded.then_some(Cow::Borrowed(raw)),
+        ));
     }
 
-    let mut encoded = Vec::with_capacity(raw.len() + 8);
-    let mut decoded = want_decoded.then(|| Vec::with_capacity(raw.len()));
+    let mut encoded: Vec<u8> = Vec::with_capacity(raw.len() + 8);
+    let mut decoded: Option<Vec<u8>> = want_decoded.then(|| Vec::with_capacity(raw.len()));
     let mut i = 0;
     while i < raw.len() {
-        let c = raw[i];
-        let b = if c == b'%' {
+        let c: u8 = raw[i];
+        let b: u8 = if c == b'%' {
             if i + 2 >= raw.len() || !is_hex(raw[i + 1]) || !is_hex(raw[i + 2]) {
                 return Err(UriError);
             }
@@ -820,7 +885,7 @@ fn canonicalize_query_component(
             write_escaped_byte(&mut encoded, b);
         }
     }
-    Ok((encoded, decoded))
+    Ok((Cow::Owned(encoded), decoded.map(Cow::Owned)))
 }
 
 fn query_component_needs_slow_path(raw: &[u8]) -> Result<bool, UriError> {
@@ -1027,7 +1092,7 @@ pub fn hash_access_key(access_key: &str) -> String {
     out
 }
 
-fn parse_amz_date(value: &str) -> Option<ParsedAmzDate> {
+fn parse_amz_date(value: &str) -> Option<ParsedAmzDate<'_>> {
     let b = value.as_bytes();
     if b.len() != 16 || b[8] != b'T' || b[15] != b'Z' {
         return None;
@@ -1056,7 +1121,7 @@ fn parse_amz_date(value: &str) -> Option<ParsedAmzDate> {
         .saturating_add((minute as i64) * 60)
         .saturating_add(second as i64);
     Some(ParsedAmzDate {
-        date: value[..8].to_string(),
+        date: &value[..8],
         epoch_seconds,
     })
 }
@@ -1206,7 +1271,7 @@ pub mod internals {
 
     /// Re-encode a validated raw path into its canonical form.
     pub fn canonical_uri_from_valid_path(raw_path: &[u8]) -> Vec<u8> {
-        super::canonical_uri_from_valid_path(raw_path)
+        super::canonical_uri_from_valid_path(raw_path).into_owned()
     }
 
     /// Parse an `X-Amz-Date` value, returning the epoch seconds on success.
