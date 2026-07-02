@@ -98,32 +98,40 @@ hot path and its per-request allocations.
 
 ### Latency per `verify()` call
 
-| Case                                | Latency (point estimate) |
-| ----------------------------------- | ------------------------ |
-| `valid_get_warm_cache`              | 2.82 µs                  |
-| `valid_get_high_cardinality_query`  | 7.12 µs                  |
-| `valid_get_long_path` (~2KB path)   | 10.70 µs                 |
-| `deny_signature_mismatch`           | 2.77 µs                  |
-| `deny_missing_params`               | 1.94 µs                  |
-| `deny_invalid_path_traversal`       | 0.24 µs                  |
-| `deny_expired`                      | 2.68 µs                  |
+| Case                                | Latency (point estimate) | Before alloc-reduction |
+| ----------------------------------- | ------------------------ | ---------------------- |
+| `valid_get_warm_cache`              | 1.20 µs                  | 2.82 µs                |
+| `valid_get_high_cardinality_query`  | 2.89 µs                  | 7.12 µs                |
+| `valid_get_long_path` (~2KB path)   | 6.04 µs                  | 10.70 µs               |
+| `deny_signature_mismatch`           | 1.22 µs                  | 2.77 µs                |
+| `deny_missing_params`               | 0.74 µs                  | 1.94 µs                |
+| `deny_invalid_path_traversal`       | 0.13 µs                  | 0.24 µs                |
+| `deny_expired`                      | 0.82 µs                  | 2.68 µs                |
+
+The "before" column is the same benchmark prior to the borrow-based parser
+rework (Cow query components, borrowed credential scope/date, pre-sized
+canonical buffers) that cut allocations from ~47 to ~9 per call. Both columns
+were measured on the same machine/toolchain; treat the ~2× improvement as
+approximate since the runs were weeks apart.
 
 ### Allocations per `verify()` call
 
-| Case                       | Allocations | Bytes  |
-| -------------------------- | ----------- | ------ |
-| `valid_get_warm_cache`     | 47          | 1755   |
-| `deny_signature_mismatch`  | 47          | 1769   |
-| `deny_missing_params`      | 39          | 1207   |
+| Case                       | Allocations | Bytes  | Before rework    |
+| -------------------------- | ----------- | ------ | ---------------- |
+| `valid_get_warm_cache`     | 9           | 1060   | 47 / 1755 B      |
+| `deny_signature_mismatch`  | 9           | 1074   | 47 / 1769 B      |
+| `deny_missing_params`      | 7           | 560    | 39 / 1207 B      |
 
-The successful path currently allocates (method/host normalization, the
-owned canonical path/query buffers, signing-key cache lookup keys, and the
-returned `VerifyResult`). The requirements allow heap allocation on the success
-path only if benchmarking proves it negligible; at ~47 small allocations /
-~1.7KB per request these are candidates for reduction (e.g. reusing scratch
-buffers, borrowing where the unsafe boundary allows) before the module is
-declared production-ready. The single-microsecond latencies suggest the
-allocator cost is small in absolute terms, but the count is worth driving down.
+The parse layer now borrows from the raw URI instead of copying: query
+components are `Cow<[u8]>` (owned only when a component actually needs
+percent-recoding), the credential scope and `X-Amz-Date` are fully borrowed,
+method/host normalization borrows when the input is already canonical, and the
+canonical query string is built in one pre-sized buffer with an unstable sort
+(no auxiliary allocation). What remains on the success path is essentially
+irreducible without changing the public API: the owned result `path`, the
+params vector, the slow-path re-encode of the credential value (it contains
+`%2F`), the canonical-request and string-to-sign scratch buffers, and the
+`String` clones in the returned `VerifyResult`.
 
 ### Notes
 
@@ -217,8 +225,9 @@ verifier process's 0.48 cores, so no per-cycle CPU figure is claimed here. Note
 also that 2,385 cycles is a function of the *default* `GOGC=100` on a tiny live
 heap: raising `GOGC` or setting `GOMEMLIMIT` would cut the cycle count
 substantially, so this is a default-tuning artifact, not an inherent floor. The
-Rust module has no GC; its ~47 allocations/request are deterministic pool/heap
-operations, visible in its flatter distribution (p99 only 1.3× p50).
+Rust module has no GC; its per-request allocations (~47 at the time of this
+run, since reduced to ~9) are deterministic pool/heap operations, visible in
+its flatter distribution (p99 only 1.3× p50).
 
 Same caveats as above: Docker Desktop VM on macOS, one nginx worker per
 stack; re-run on Linux for production sign-off. Regenerate the corpus and
