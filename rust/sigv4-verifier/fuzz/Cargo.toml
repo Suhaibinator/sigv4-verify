@@ -1,0 +1,66 @@
+# Standalone workspace so the fuzz crate (which depends on the nightly-only
+# libfuzzer-sys) is not built as part of the root workspace.
+[workspace]
+
+[package]
+name = "sigv4-verifier-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.sigv4-verifier]
+path = ".."
+features = ["internals"]
+
+[profile.release]
+debug = 1
+
+# Prevent this from interfering with `cargo test` in the workspace.
+[[bin]]
+name = "fuzz_split_uri"
+path = "fuzz_targets/fuzz_split_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_percent_decode"
+path = "fuzz_targets/fuzz_percent_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonical_query"
+path = "fuzz_targets/fuzz_canonical_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_credential_scope"
+path = "fuzz_targets/fuzz_credential_scope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonical_path"
+path = "fuzz_targets/fuzz_canonical_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_verify"
+path = "fuzz_targets/fuzz_verify.rs"
+test = false
+doc = false
+bench = false

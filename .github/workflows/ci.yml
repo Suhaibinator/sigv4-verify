@@ -36,6 +36,111 @@ jobs:
       - name: Build
         run: go build ./cmd/sigv4-verify
 
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential clang libclang-dev libssl-dev libpcre2-dev zlib1g-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy -p sigv4-verifier -p sigv4-module-config --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p sigv4-verifier -p sigv4-module-config --locked
+
+      - name: Clippy NGINX module
+        run: cargo clippy -p ngx-http-sigv4-verify --locked --features vendored --all-targets -- -D warnings
+
+      - name: Build NGINX module
+        run: cargo build --release -p ngx-http-sigv4-verify --locked --features vendored
+
+  fuzz:
+    name: Rust Fuzz Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential clang libclang-dev
+
+      - name: Set up Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/sigv4-verifier/fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz smoke (30s per target)
+        working-directory: rust/sigv4-verifier
+        # `cargo +nightly` overrides the repo's rust-toolchain.toml (1.96.0
+        # stable), which would otherwise win over the job default and reject
+        # cargo-fuzz's -Z sanitizer flags.
+        run: |
+          for target in \
+            fuzz_split_uri \
+            fuzz_percent_decode \
+            fuzz_canonical_query \
+            fuzz_credential_scope \
+            fuzz_canonical_path \
+            fuzz_verify; do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=30
+            echo "::endgroup::"
+          done
+
+  module-image:
+    name: Rust Module Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build module image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/nginx-module/Dockerfile
+          push: false
+          tags: sigv4-verify-nginx-module:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   e2e:
     name: NGINX Transport E2E
     runs-on: ubuntu-latest
