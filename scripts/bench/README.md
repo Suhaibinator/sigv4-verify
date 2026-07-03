@@ -17,6 +17,12 @@ containers are wired together, and reuse that topology for benchmarking).
   prints p50/p90/p99/p99.9 latency.
 - `bench.sh` — run wrk (primary) or oha (fallback) against a base URL and a
   request-line file.
+- `e2e-linux.sh` — self-contained Linux reproducer: builds the module + Go
+  sidecar images, stands up the baseline/module/sidecar stacks on a private
+  docker network, and drives them in-network with `cmd/loadgen` (mixed corpus
+  from `cmd/gen-barrage`), reporting RPS, latency percentiles, cgroup CPU/RSS,
+  and sidecar GC cycles. Reproduces the "Results (Linux, NGINX e2e …)" tables in
+  `docs/benchmarks.md`. Requires a cgroup-v2 host with Docker + Go.
 
 ## The benchmark matrix
 

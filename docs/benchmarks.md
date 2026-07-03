@@ -2,8 +2,8 @@
 
 This document covers how to run the benchmarks for the Rust SigV4 verifier core
 and the NGINX module e2e path, the acceptance targets from
-`docs/rust-nginx-module-requirements.md`, and the core-verifier results measured
-so far.
+`docs/rust-nginx-module-requirements.md`, and the results measured so far (the
+core verifier on Apple Silicon and Linux, and the NGINX e2e path on Linux).
 
 ## What is benchmarked
 
@@ -68,6 +68,29 @@ scripts/bench/bench.sh --base http://127.0.0.1:8080 --urls /tmp/urls.txt \
   --host assets.example.test --duration 30s --connections 64 --threads 4
 ```
 
+### One-shot Linux reproducer
+
+`scripts/bench/e2e-linux.sh` reproduces the Linux e2e result tables below end to
+end on a cgroup-v2 Linux host with Docker + Go, with no manual wiring. It builds
+the module image (`build/nginx-module/Dockerfile`) and a scratch Go sidecar
+image, stands up the baseline / module / sidecar stacks on a private docker
+network, generates the corpora (`cmd/presign-url` for the single hot URL,
+`cmd/gen-barrage` for the 500-line mixed barrage), drives each stack in-network
+with `cmd/loadgen`, and prints RPS, p50/p90/p99/p99.9, average CPU cores (from
+each container's cgroup `cpu.stat` delta), sampled RSS, and the sidecar's Go
+GC-cycle count. It tears everything down on exit.
+
+```sh
+scripts/bench/e2e-linux.sh
+# tunables (env): DUR_FIRST C_FIRST DUR_BARR C_BARR N NGINX_VERSION
+```
+
+Each invocation runs one first-pass and one barrage window per stack; run it a
+few times to average out noise (the tables below are the mean of two runs).
+`cmd/gen-barrage` and `cmd/loadgen` are benchmark-only tools, not part of the
+shipped product; `cmd/loadgen` stands in for wrk (which failed to build against
+this box's toolchain) and reports the same percentiles the wrk harness does.
+
 ## Acceptance targets
 
 From `docs/rust-nginx-module-requirements.md` (Performance Requirements). These
@@ -88,8 +111,8 @@ per request (core bench), worker RSS, and the error/deny-reason distribution.
 
 Core-verifier-only. These are **not** the NGINX e2e numbers and are not directly
 comparable to the Go sidecar — the acceptance targets above are defined against
-the NGINX e2e path, which is measured on Linux (TBD). They characterize the Rust
-hot path and its per-request allocations.
+the NGINX e2e path, which is measured on Linux (see the Linux e2e sections
+below). They characterize the Rust hot path and its per-request allocations.
 
 - Machine: Apple M4 Max (16 cores), macOS 26.5.2.
 - Toolchain: rustc 1.96.0, `--release`/bench profile (`panic = "abort"`).
@@ -237,5 +260,154 @@ Rust module has no GC; its ~9 allocations/request are deterministic heap
 operations, visible in its flatter distribution (p99 only 1.3× p50).
 
 Same caveats as above: Docker Desktop VM on macOS, one nginx worker per
-stack; re-run on Linux for production sign-off. Regenerate the corpus and
+stack. The bare-metal Linux sign-off runs are below. Regenerate the corpus and
 rerun with `scripts/bench/gen-urls.sh` + `scripts/bench/bench.sh`.
+
+## Results (Linux, core-only)
+
+The same core-verifier-only bench as the Apple Silicon section above (no NGINX,
+no I/O, no network), re-run on Linux x86-64.
+
+- Machine: AMD Ryzen 9 9950X3D (16 cores / 32 threads), Ubuntu 24.04.4 LTS,
+  Linux 6.17.
+- Toolchain: rustc 1.96.0, `--release`/bench profile (`panic = "abort"`).
+- criterion 0.5, 100 samples/case; the value shown is criterion's point
+  estimate (median of the reported `[lo est hi]` interval).
+
+### Latency per `verify()` call
+
+| Case                                | Linux (Ryzen 9950X3D) | Apple M4 Max |
+| ----------------------------------- | --------------------- | ------------ |
+| `valid_get_warm_cache`              | 1.33 µs               | 1.20 µs      |
+| `valid_get_high_cardinality_query`  | 3.01 µs               | 2.89 µs      |
+| `valid_get_long_path` (~2KB path)   | 5.83 µs               | 6.04 µs      |
+| `deny_signature_mismatch`           | 1.32 µs               | 1.22 µs      |
+| `deny_missing_params`               | 0.67 µs               | 0.74 µs      |
+| `deny_invalid_path_traversal`       | 0.12 µs               | 0.13 µs      |
+| `deny_expired`                      | 0.72 µs               | 0.82 µs      |
+
+The two machines land within ~10% of each other on every case; the Ryzen is a
+hair slower on the small cases and marginally faster on the ~2KB long-path case.
+The shape is identical — ~1 µs for a warm valid verify, ~0.1 µs for an early
+path-rejection.
+
+### Allocations per `verify()` call
+
+Identical to Apple Silicon (9 / 1060 B valid-warm, 9 / 1074 B signature
+mismatch, 7 / 560 B missing-params): allocation count and bytes are a property
+of the code path, not the platform. See the Apple Silicon section for the
+breakdown of what those allocations are.
+
+## Results (Linux, NGINX e2e, first pass — saturated single worker)
+
+The production-relevant e2e comparison, on bare-metal Linux with native Docker
+(no VM, unlike the Apple Silicon Docker Desktop runs). Topology mirrors the e2e
+tests: the module image (`build/nginx-module/Dockerfile`, nginx 1.28.0 + module,
+enforce mode) versus the Go sidecar over a unix socket behind `auth_request`
+(official `nginx:1.28.0`, `keepalive 16` upstream), versus the same nginx serving
+the same file with no verification. One nginx worker each, identical static
+origin fixture, identical valid presigned GET (warm signing-key cache), all
+responses 200. Load was driven by `cmd/loadgen`, an in-network keep-alive HTTP
+client (`-c 128`, 5 s warmup, 20 s window) on the same Docker network as the
+stacks, so there is no host port-forwarding in the path. The whole run is
+reproduced by `scripts/bench/e2e-linux.sh`. CPU is the average cores over the window from
+each container's cgroup `cpu.stat` (`usage_usec` delta); for the sidecar it is
+reported as nginx-worker + verifier-process. Numbers are the mean of two runs,
+which agreed within ~5%.
+
+| Stack                        | RPS     | p50     | p90     | p99     | CPU (cores) | CPU/req (µs·core) |
+| ---------------------------- | ------- | ------- | ------- | ------- | ----------- | ----------------- |
+| Baseline (no verification)   | 131,000 | 0.96 ms | 1.16 ms | 2.04 ms | 0.94        | 7.2               |
+| Rust module (in-process)     | 108,000 | 1.17 ms | 1.38 ms | 2.17 ms | 0.96        | 8.9               |
+| Go sidecar (unix socket)     | 68,500  | 1.81 ms | 2.32 ms | 3.54 ms | 0.97 + 4.65 | 82                |
+
+The load saturates the single nginx worker (baseline pins ~0.94 of one core), so
+this pass measures **single-worker capacity**, and the latencies include queueing
+at saturation.
+
+Module vs the unverified baseline — the true in-process verification cost, no
+longer masked by a VM as it was on Apple Silicon:
+
+- Throughput −18% (108k vs 131k RPS): the module's verification runs inside the
+  one nginx worker, so at CPU saturation it competes directly with request
+  serving. Per-request CPU rises from ~7.2 to ~8.9 µs·core — ~1.7 µs·core of
+  added work, consistent with the ~1.3 µs core-bench warm path plus module glue.
+  In a latency-bound deployment (worker not saturated) the same cost shows up as
+  sub-millisecond added latency instead, as the Apple Silicon VM run did
+  (+0.1 ms), rather than as lost throughput.
+- p50 +0.21 ms, p99 +0.13 ms.
+
+Module vs the Go sidecar (the acceptance-target comparison):
+
+- Throughput +58% (108k vs 68.5k RPS).
+- CPU per request ~9× lower: ~8.9 vs ~82 µs·core (the sidecar total includes both
+  the nginx worker and the verifier process).
+- Latency lower across the distribution: p50 −35%, p90 −40%, p99 −39%.
+
+Against the acceptance targets (module verification latency ≥30% lower at p50 and
+≥20% lower at p99 versus the sidecar): **met** — p50 −35% and p99 −39%.
+
+## Results (Linux, NGINX e2e, mixed adversarial barrage)
+
+Same three stacks and network, driven with a 500-line mixed corpus replayed
+round-robin (`-c 64`, 5 s warmup, 60 s window). Corpus mix (fractions of 500):
+55% valid GET (unique `response-content-*`, warm signing-key cache), 10%
+high-cardinality valid (extra signed `response-content-*` params), 5% valid long
+path (~1 KB key, origin 404), 10% tampered signature, 5% expired, 5% unknown
+access key, 5% prefix denial, 3% missing SigV4 param, 2% POST. Expected verify
+reject ratio 30% (403s); expected non-2xx 35% (rejects plus the 5% long-path
+404s). Both verified stacks returned exactly 35.0% non-2xx and the baseline 7.0%
+(long-path 404s + POST 405s), confirming identical decisions under load. The
+sidecar ran with `GODEBUG=gctrace=1`. Numbers are the mean of two 60 s runs,
+which agreed within ~4%.
+
+| Stack                      | RPS     | p50     | p90     | p99     | p99.9   | CPU (cores) | RSS            | GC/60s   |
+| -------------------------- | ------- | ------- | ------- | ------- | ------- | ----------- | -------------- | -------- |
+| Baseline (no verification) | 129,000 | 0.49 ms | 0.57 ms | 1.04 ms | 1.87 ms | 0.95        | 9.5 MiB        | —        |
+| Rust module (in-process)   | 114,000 | 0.55 ms | 0.65 ms | 1.08 ms | 1.93 ms | 0.96        | 9.7 MiB        | —        |
+| Go sidecar (unix socket)   | 64,000  | 0.92 ms | 1.48 ms | 2.81 ms | 4.10 ms | 0.96 + 6.07 | 9.6 + 23.2 MiB | ~66,600  |
+
+Module vs sidecar (identical request outcomes, so directly comparable):
+
+- **Throughput +78%** (114k vs 64k RPS).
+- **CPU per request ~13× lower**: ~8.4 vs ~110 µs·core (sidecar total = the nginx
+  worker plus the verifier process).
+- **Latency lower across the whole distribution**: p50 −40%, p90 −56%, p99 −62%,
+  p99.9 −53%. The module's tail is far flatter — p99 is only ~2× its p50, the
+  sidecar's is ~3× — reflecting the absence of GC pauses.
+
+Module vs baseline: −12% throughput (114k vs 129k). Note this is the opposite
+sign from the Apple Silicon barrage, where the module out-ran the unverified
+baseline. The reason is topological: on the Docker Desktop VM the baseline paid a
+heavy per-request serving cost, so the module short-circuiting 35% of the corpus
+to cheap in-access 403s made it *faster* overall. On bare-metal Linux serving the
+15-byte cached file is nearly free, so the added verification work (run on every
+request) is no longer offset by the origin work it saves, and the module lands
+~12% below baseline. As on Apple Silicon, this is **not** an apples-to-apples
+"verification is free" claim in either direction — the baseline and the module do
+different work on a reject-heavy corpus. The honest same-work overhead is the
+all-200 first pass above (−18% at single-worker saturation, sub-ms in a
+latency-bound regime).
+
+### Go GC behavior under the barrage
+
+The sidecar verifier ran **~66,600 GC cycles in the 60 s window** — roughly
+1,100/s, one every ~57 requests — because its live heap is tiny (single-MB) and
+per-request allocations churn straight through it at the default `GOGC=100`. That
+is far more cycles than the Apple Silicon barrage (2,568 in 60 s), but almost
+entirely because this run sustains ~5–6× the request rate; per request it is the
+same behavior. The cost surfaces as the ~6.1 cores the verifier process burns and
+in its heavier latency tail. The Rust module has no GC; its ~9 deterministic
+allocations per request produce the flat distribution (p99 ~2× p50). As on Apple
+Silicon, the cycle count is a function of `GOGC=100` on a small live heap —
+raising `GOGC` or setting `GOMEMLIMIT` would cut it substantially, so it is a
+default-tuning artifact, not an inherent floor.
+
+Caveats: bare-metal Linux with native Docker, one nginx worker per stack, two
+60 s windows. The load generator is `cmd/loadgen`, an in-network Go keep-alive
+client (wrk failed to build against this box's toolchain); it reports the same
+percentiles the wrk harness does. The whole run is reproduced by
+`scripts/bench/e2e-linux.sh` (see "Running the e2e harness" above). Absolute
+numbers are not comparable across the Apple Silicon and Linux sections (different
+hardware, and native vs VM Docker with in-network vs host-forwarded load); only
+the within-section stack-to-stack deltas are.
