@@ -488,7 +488,10 @@ func (c *compiledCredential) pathAllowed(path string) bool {
 		return true
 	}
 	for _, prefix := range c.allowedPrefixes {
-		if strings.HasPrefix(path, prefix) {
+		if path == prefix {
+			return true
+		}
+		if strings.HasPrefix(path, prefix) && (strings.HasSuffix(prefix, "/") || path[len(prefix)] == '/') {
 			return true
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -243,6 +244,47 @@ func TestVerifierRejectsCredentialAndPolicyDenials(t *testing.T) {
 	})
 }
 
+func TestVerifierEnforcesPathPrefixBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		prefix  string
+		path    string
+		allowed bool
+	}{
+		{name: "exact path", prefix: "/bucket/public", path: "/bucket/public", allowed: true},
+		{name: "slash-delimited descendant", prefix: "/bucket/public", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "trailing-slash prefix", prefix: "/bucket/public/", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "root prefix", prefix: "/", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "adjacent name", prefix: "/bucket/public", path: "/bucket/publicity/secret.jpg", allowed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := newTestVerifier(t, Credential{
+				AccessKey:       testAccessKey,
+				SecretKey:       testSecretKey,
+				Enabled:         true,
+				MaxExpires:      time.Hour,
+				AllowedHosts:    []string{testHost},
+				AllowedMethods:  []string{"GET", "HEAD"},
+				AllowedPrefixes: []string{tt.prefix},
+			})
+			rawURI := presignedURI(t, presignInput{
+				Method: "GET",
+				Path:   tt.path,
+				Host:   testHost,
+			})
+
+			result := v.Verify("GET", rawURI, testHost, "https", testNow)
+			if tt.allowed {
+				requireAllowed(t, result, tt.path)
+			} else {
+				requireDenied(t, result, ReasonUnauthorized)
+			}
+		})
+	}
+}
+
 func TestVerifierRejectsExpiredFutureDatedAndOverMaxExpires(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		v := newTestVerifier(t)
@@ -391,6 +433,27 @@ func TestVerifierAllowsCanonicalQueryCases(t *testing.T) {
 	}
 }
 
+func TestVerifierAllowsHighCardinalityCanonicalQuery(t *testing.T) {
+	v := newTestVerifier(t)
+	extra := make([]rawQueryParam, 0, 512)
+	for i := 511; i >= 0; i-- {
+		extra = append(extra, rawQueryParam{
+			Name:  fmt.Sprintf("param-%04d", i),
+			Value: fmt.Sprintf("value-%04d", i),
+		})
+	}
+
+	rawURI := presignedURI(t, presignInput{
+		Method: "GET",
+		Path:   "/bucket/file.jpg",
+		Host:   testHost,
+		Extra:  extra,
+	})
+
+	result := v.Verify("GET", rawURI, testHost, "https", testNow)
+	requireAllowed(t, result, "/bucket/file.jpg")
+}
+
 func TestVerifierRejectsTraversalAndAmbiguousPaths(t *testing.T) {
 	v := newTestVerifier(t)
 	rawURI := presignedURI(t, presignInput{
@@ -425,6 +488,41 @@ func BenchmarkVerifierVerifyValid(b *testing.B) {
 		result := v.Verify("GET", rawURI, testHost, "https", testNow)
 		if !result.Allowed {
 			b.Fatalf("Verify() denied valid request: reason=%s", result.Reason)
+		}
+	}
+}
+
+func BenchmarkVerifierVerifyMissingParamsHighCardinality(b *testing.B) {
+	v := newTestVerifier(b)
+	for _, count := range []int{12, 100, 400, 500} {
+		for _, descending := range []bool{false, true} {
+			order := "ascending"
+			if descending {
+				order = "descending"
+			}
+			b.Run(fmt.Sprintf("%s/%d", order, count), func(b *testing.B) {
+				params := make([]rawQueryParam, 0, count)
+				for i := 0; i < count; i++ {
+					value := i
+					if descending {
+						value = count - i - 1
+					}
+					params = append(params, rawQueryParam{
+						Name:  fmt.Sprintf("param-%04d", value),
+						Value: "value",
+					})
+				}
+				rawURI := "/bucket/file.jpg?" + joinRawQuery(params)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					result := v.Verify("GET", rawURI, testHost, "https", testNow)
+					if result.Reason != ReasonMissingQueryParam {
+						b.Fatalf("Verify() reason = %q, want %q", result.Reason, ReasonMissingQueryParam)
+					}
+				}
+				b.ReportMetric(float64(len(rawURI)), "uri_B")
+			})
 		}
 	}
 }

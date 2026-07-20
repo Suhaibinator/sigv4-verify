@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -222,17 +223,14 @@ func canonicalQuery(rawQuery string) (string, sigV4Query, error) {
 }
 
 func sortCanonicalQueryParams(params []canonicalQueryParam) {
-	for i := 1; i < len(params); i++ {
-		current := params[i]
-		j := i - 1
-		for ; j >= 0; j-- {
-			if params[j].name < current.name || (params[j].name == current.name && params[j].value <= current.value) {
-				break
-			}
-			params[j+1] = params[j]
+	// Equal entries are byte-identical in the canonical output, so the
+	// standard library's unstable O(n log n) sort preserves SigV4 semantics.
+	slices.SortFunc(params, func(a, b canonicalQueryParam) int {
+		if order := strings.Compare(a.name, b.name); order != 0 {
+			return order
 		}
-		params[j+1] = current
-	}
+		return strings.Compare(a.value, b.value)
+	})
 }
 
 func isKnownQueryName(name string) bool {

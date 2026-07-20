@@ -193,9 +193,11 @@ Important details:
   `X-Original-Method`.
 - Set `X-Original-Host` to the public host used by the client.
 - Keep the verifier upstream internal, with keepalive and short timeouts.
-- If caching object responses, exclude query parameters from the cache key with
-  `proxy_cache_key "$scheme://$host$uri";` so different presigned URLs for the
-  same object share the same cached object response after verification.
+- If caching object responses, include the complete signed request URI in the
+  cache key with `proxy_cache_key "$scheme://$host$request_uri";`. Signed S3
+  query parameters can select a different object version, response body, or
+  response metadata for the same path, so those requests must not share a cache
+  entry. This also means refreshed presigned URLs create separate cache entries.
 - Preserve signed public host alignment. Presign URLs for `assets.example.com`
   when clients request `assets.example.com`; do not presign for `minio:9000`
   and then serve the same URL through another public host.

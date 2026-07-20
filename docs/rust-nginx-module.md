@@ -304,14 +304,16 @@ http {
             sigv4_verify on;
             proxy_pass http://minio_origin;
             proxy_cache s3_assets;
-            proxy_cache_key "$scheme://$host$uri";
+            proxy_cache_key "$scheme://$host$request_uri";
         }
     }
 }
 ```
 
-Use `proxy_cache_key "$scheme://$host$uri"` (no query string) so different
-presigned URLs for the same object share one cached response after verification.
+Use `proxy_cache_key "$scheme://$host$request_uri"` so the complete signed query
+participates in cache identity. S3 query parameters can select a different object
+version, response body, or response metadata for the same path. Refreshed presigned
+URLs therefore create separate cache entries.
 
 ## Variables and logging
 
