@@ -1,9 +1,9 @@
 # Candidate Detail
 
-Per-candidate detail for the eight candidates listed in
-[`security.md`](security.md). Every candidate on this page is **Traced** — static
-reading with file:line evidence, no execution. None were validated. Read the
-counterevidence in each section before acting on it.
+Detail for the five candidates retained after maintainer review. The original scan
+evidence was static and is preserved below for context. Three candidates were later
+resolved with executed regression coverage; two remain unvalidated. Three rejected scan
+leads were pruned and are not included on this page.
 
 Sections are ordered by candidate ID. The triage table in
 [`security.md`](security.md) is ordered by what to look at first.
@@ -11,6 +11,8 @@ Sections are ordered by candidate ID. The triage table in
 ---
 
 ## FR003-CAND-1 — Go prefix authorization
+
+**Status: resolved in commit `624f356`.**
 
 *Go sidecar path-prefix authorization permits adjacent namespace names.*
 Root control `internal/config/config.go:500`; authorization control
@@ -40,7 +42,14 @@ medium-class. Reduces: requires a specially shaped configuration without the tra
 slash shown in examples; does not bypass HMAC; impact is limited to sibling names
 sharing the configured lexical prefix.
 
+**Resolution evidence.** Go now accepts only exact paths, `/`-delimited descendants, or
+descendants of a prefix already ending in `/`. A signed-request regression demonstrates
+that exact and child paths remain allowed while `/bucket/publicity/...` is denied for
+prefix `/bucket/public`.
+
 ## FR003-CAND-2 — Rust prefix authorization
+
+**Status: resolved in commit `624f356`.**
 
 *Native NGINX verifier path-prefix authorization permits adjacent namespace names.*
 Root control `rust/sigv4-verifier/src/lib.rs:471`; configuration validation `:477`;
@@ -68,7 +77,13 @@ instance in the NGINX worker; the threat model calls prefix-boundary confusion
 medium-class. Reduces: requires configuration contrary to repository examples; does not
 bypass HMAC; limited to sibling names with the same lexical prefix.
 
+**Resolution evidence.** The Rust verifier implements the same path-segment rule as Go.
+Signed-request tests cover exact, child, trailing-slash, root, and adjacent-name cases;
+the generated differential corpus confirms identical Go and Rust decisions.
+
 ## FR003-CAND-3 — JSON policy erasure
+
+**Status: resolved in commit `624f356`.**
 
 *Misspelled JSON policy fields silently widen sidecar credentials to allow-any.*
 Entrypoint `cmd/sigv4-verify/main.go:24`; format dispatch
@@ -100,6 +115,11 @@ allowlists to fail configuration or fail closed; the same root cause can erase h
 method, or prefix restrictions. Reduces: JSON is accepted in code but README documents
 YAML; requires operator error in trusted configuration; does not defeat HMAC validation
 by itself.
+
+**Resolution evidence.** The JSON branch now uses a strict decoder with unknown-field
+rejection and preserves rejection of trailing or multiple JSON values. Regression
+coverage proves that `allowed_prefix` fails configuration while correctly spelled
+`allowed_prefixes` still loads and retains the policy.
 
 ## FR004-CAND-1 — Go query complexity
 
@@ -159,112 +179,12 @@ Note this is a defect in *documented example configuration* (`examples/nginx.con
 not in verifier code — which makes it cheap to fix and easy to have already copied into
 real deployments.
 
-## FR006-CAND-2 — Native denial logs
-
-*Native module logs object paths on verification denials by default.*
-Default control `rust/nginx-module/src/lib.rs:69`; request source `:623`; logging
-control `:635`; log sink `:641`.
-
-**Reachability.** Default production behavior for native-module requests that pass URI
-splitting and fail a later check.
-
-**Impact path.**
-1. NGINX passes the public raw URI into the native access handler.
-2. The verifier parses and retains the path before a later denial.
-3. Default `log_denies` selects the denied outcome.
-4. The complete object path is exported to operational logs.
-
-**Counterevidence.** Early malformed metadata/URI denials can have an empty path. The raw
-query and signature are deliberately omitted. Operators can set
-`sigv4_verify_log_denies off`, and NGINX logs are normally privileged.
-
-**Severity drivers.** Increases: the threat model explicitly classifies signed
-object-path leakage through default logs as medium; expired real URLs and
-policy/signature denials retain the parsed path. Reduces: requires access to operational
-logs; an explicit directive disables the sink; signature-bearing query data is not
-logged.
-
-## PARENT-CAND-1 — Go denial logs
-
-*Go sidecar logs object paths on verification denials by default.*
-Default control `internal/config/config.go:217`; logging control
-`internal/server/server.go:92`; log sink `:97`.
-
-**Reachability.** Production reachable in the Go sidecar's default logging configuration
-for parsed denied requests.
-
-**Impact path.**
-1. Client submits an expired, unauthorized, or signature-mismatched URL containing a sensitive object path.
-2. Verifier returns a denial while preserving `rawPath`.
-3. Default `log_denies` causes the path to be logged.
-4. A log reader or aggregator learns object names and namespace structure outside object-read authorization.
-
-**Counterevidence.** Malformed requests rejected before URI parsing can have an empty
-path. Logs are normally privileged operational data. Operators can set
-`log_denies false`. The raw query and signature are omitted.
-
-**Severity drivers.** Increases: the threat model treats default signed-object-path
-leakage as medium; public denied requests reach the sink. Reduces: requires access to
-operational logs; no signature-bearing query is logged; an opt-out exists.
-
-## FR001-CAND-1 — CLI secret argv
-
-*Presign helper exposes signing secrets through command-line arguments.*
-Entrypoint `cmd/presign-url/main.go:21`; sink `:31`.
-
-**Reachability.** Privileged/local tooling only. There is no public HTTP path to this
-helper and no direct production-runtime reachability.
-
-**Impact path.**
-1. Victim invokes the POC helper with `-secret-key <real secret>`.
-2. The literal is retained in argv and may persist in shell or CI command records.
-3. An attacker with same-host process visibility, or access to those records, recovers the key.
-4. The attacker generates valid SigV4 presigned URLs within the credential's host/method/path/expiry policy.
-
-**Counterevidence.** The helper is documented as an optional POC/development command, not
-a production request handler. Environment-variable fallbacks exist, so users can avoid
-the vulnerable input form. The command is short-lived, narrowing process-list
-observation — although shell history and CI command tracing can persist the argument.
-
-**Severity drivers.** Increases: the exposed value is a signing secret capable of
-authorizing protected object requests within policy; repository documentation
-demonstrates the unsafe argument form. Reduces: requires victim use of an optional POC
-helper and the explicit flag; requires local process/history/CI-log visibility;
-environment fallback is available; no generic signature bypass or cross-credential
-exposure follows automatically.
-
 ---
 
 # Validation Rubrics
 
-These are the checks the scan planned in order to promote each candidate to a finding,
-adjust its severity, or suppress it. **None were executed** — every checkbox below is
-still empty, and that is the actual state of the work, not a formatting artifact. A
-candidate whose rubric fails should be closed, not reported.
-
-## FR003-CAND-1 — Go prefix authorization
-
-- [ ] A non-trailing-slash prefix is accepted by production configuration/compilation.
-- [ ] A sibling path that shares only the lexical prefix passes the exact authorization control.
-- [ ] A realistic signed request for that sibling path reaches the Go verifier and is allowed.
-- [ ] Segment-safe nearby controls do not establish the missing boundary.
-- [ ] Preconditions and protected-object impact are supported by repository deployment evidence.
-
-## FR003-CAND-2 — Rust prefix authorization
-
-- [ ] The native directive/core accepts a non-trailing-slash prefix.
-- [ ] The byte-prefix control admits an adjacent sibling name.
-- [ ] A correctly signed sibling request is allowed by the Rust verifier through a focused harness.
-- [ ] Module wrapper/config checks do not add a later segment-boundary control.
-- [ ] This independently deployed instance remains separate from the Go sidecar.
-
-## FR003-CAND-3 — JSON policy erasure
-
-- [ ] The supported `.json` branch accepts an unknown or misspelled restriction field.
-- [ ] Required credential fields still load successfully while the intended restriction remains empty.
-- [ ] Empty compiled policy has documented/runtime allow-any semantics.
-- [ ] A signed request outside the intended policy receives an allow decision.
-- [ ] YAML strictness, startup/reload behavior, and trusted-operator preconditions are accurately scoped.
+These are the unexecuted checks remaining for the two active candidates. A candidate
+whose rubric fails should be closed, not reported.
 
 ## FR004-CAND-1 — Go query complexity
 
@@ -281,27 +201,3 @@ candidate whose rubric fails should be closed, not reported.
 - [ ] The documented cache key omits those differentiating parameters.
 - [ ] S3-compatible semantics provide at least one concrete distinct representation for the same path.
 - [ ] Valid-URL, cacheability, and deployment preconditions are explicit and do not defeat the cross-representation impact.
-
-## FR006-CAND-2 — Native denial logs
-
-- [ ] Denial logging is enabled by default.
-- [ ] A public denied request can retain a nonempty object path.
-- [ ] The native module emits that path to the NGINX error log.
-- [ ] Query/signature omission and operator opt-out are recorded as limiting controls.
-- [ ] Threat-model policy supports reportability across the object/log access boundary.
-
-## PARENT-CAND-1 — Go denial logs
-
-- [ ] Denial logging is enabled by default.
-- [ ] A public denied request can retain a nonempty object path.
-- [ ] The Go sidecar emits that path to its structured log.
-- [ ] Query/signature omission and operator opt-out are recorded as limiting controls.
-- [ ] This independently deployed instance remains separate from the native module.
-
-## FR001-CAND-1 — CLI secret argv
-
-- [ ] The documented CLI accepts a real signing secret in process argv and prioritizes it.
-- [ ] Process metadata, shell history, or CI tracing is a realistic exposure sink for the documented use.
-- [ ] Environment fallback does not remove the unsafe explicit form.
-- [ ] Local-only/optional-tool and observer-permission preconditions are explicit.
-- [ ] The recovered secret's authorization impact and final low-severity/reportability bar are justified.

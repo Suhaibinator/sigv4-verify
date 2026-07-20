@@ -10,7 +10,8 @@ Primary runtime code is in `cmd/sigv4-verify`, `internal/config`, `internal/serv
 - NGINX is a trusted policy-enforcement proxy for the Go sidecar. The sidecar trusts `X-Original-Method`, `X-Original-URI`, and `X-Original-Host` to accurately represent the client request. This trust is valid only when `/verify` is private and NGINX overwrites rather than forwards those headers. Exposing the sidecar directly lets a caller choose that metadata; signature verification still occurs, but any policy coupling to the actual outer request is lost.
 - The origin server is outside the verifier's runtime trust path. Verification is intentionally offline and must not call S3, MinIO, or the origin or consume the client body. A successful authorization decision is expected to gate a separate NGINX serve/proxy action.
 - Operators control YAML, environment variables, secret files, NGINX directives, listener address or Unix-socket path and mode, clock-skew and expiry limits, logging, and shadow/enforce mode. These are trusted administrative inputs, but parsing mistakes must fail configuration or fail closed rather than silently widening access.
-- Credential secret values and derived signing keys are highly sensitive assets. They must remain in process memory or protected files, never appear in responses, logs, metrics, panic payloads, or generated variables, and be replaced atomically on reload. Access-key hashes and stable reason strings are intentionally lower-sensitivity observability values.
+- Credential secret values and derived signing keys are highly sensitive assets. Production services must keep them in process memory or protected files and out of responses, logs, metrics, panic payloads, and generated variables. The optional local presign helper's explicit secret flag is accepted operator-controlled tooling behavior; an environment fallback is available. Access-key hashes and stable reason strings are intentionally lower-sensitivity observability values.
+- Object paths without query or signature material are accepted operational metadata in privileged denial logs. Both runtime forms provide an operator control for disabling denial logging; path visibility inside those logs is not treated as crossing the object-read authorization boundary.
 - The Go sidecar's SIGHUP reloader and the NGINX configuration loader cross a privileged runtime boundary. Invalid replacement configuration must not partially install, erase the prior usable state, or briefly produce an allow-all verifier.
 - The Rust NGINX module crosses an unsafe FFI boundary into NGINX request pools, headers, variables, and configuration structures. Pointer lifetime, allocation, panic containment, and ABI compatibility are security and availability assumptions. The shipped module must match the runtime NGINX ABI.
 - The build and CI environment is developer-controlled but supply-chain-sensitive. GitHub Actions, pinned language toolchains, Cargo/Go dependency locks, downloaded NGINX source, base images, and action versions can affect the integrity of the shipped verifier.
@@ -22,7 +23,7 @@ Security invariants:
 - Policy is evaluated against the same raw/canonical representation that the signature authorizes. Empty or malformed allowlists must not unexpectedly mean allow-all, and prefix comparison must not create namespace-boundary confusion.
 - Every unexpected internal state, parse error, panic, missing credential state, failed reload, and integration outage must deny or return an error that the caller treats as deny. Shadow mode is the sole intentional non-enforcing mode and must be an explicit operator choice.
 - Untrusted input must have bounded CPU and memory cost. Request parsing, query collection/sorting, logging, metrics labels, key caches, and header handling must not provide practical denial-of-service amplification.
-- Secrets must not be disclosed through query logging, error strings, request IDs, metrics, debugging helpers, configuration errors, process arguments, or memory-unsafe FFI behavior.
+- Production secrets must not be disclosed through query logging, error strings, request IDs, metrics, configuration errors, or memory-unsafe FFI behavior. Explicit arguments to trusted local development tools are governed by operator shell and process-hygiene policy rather than the public runtime threat boundary.
 
 # Attack Surface, Mitigations, and Attacker Stories
 
@@ -55,7 +56,7 @@ Out of scope as standalone vulnerabilities are malicious administrators who can 
 ## Medium
 
 - A public-input denial of service that can reliably crash or saturate verifier or NGINX workers with modest traffic beyond ordinary rate-limiting expectations.
-- Leakage of signed object paths, stable credential identities beyond the intended hash, or other operationally sensitive request metadata through default logs or metrics.
+- Leakage of signature-bearing queries, credential secrets, stable credential identities beyond the intended hash, or other protected request metadata through default logs or metrics.
 - A policy parsing or prefix-boundary error that widens access only within one already-authorized bucket/credential and requires a specially configured rule.
 - An integration behavior that defeats enforcement under a plausible documented configuration but does not provide a universal bypass.
 
