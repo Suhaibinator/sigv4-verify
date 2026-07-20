@@ -95,7 +95,7 @@ fn fixed_credentials() -> Vec<Credential> {
             allowed_methods: vec!["GET".to_string()],
             allowed_prefixes: Vec::new(),
         },
-        // Prefix-restricted to /public-bucket/.
+        // Prefix-restricted to /public-bucket/public without a trailing slash.
         Credential {
             access_key: KEY_PREFIX.to_string(),
             secret_key: SECRET_PREFIX.to_string(),
@@ -103,7 +103,7 @@ fn fixed_credentials() -> Vec<Credential> {
             max_expires: Duration::ZERO,
             allowed_hosts: Vec::new(),
             allowed_methods: Vec::new(),
-            allowed_prefixes: vec![b"/public-bucket/".to_vec()],
+            allowed_prefixes: vec![b"/public-bucket/public".to_vec()],
         },
         // Short max expiry (60s).
         Credential {
@@ -139,6 +139,7 @@ fn matches_go_verifier_decisions() {
         .expect("fixed verifier config is valid");
 
     let mut count = 0;
+    let mut prefix_boundary_count = 0;
     for (index, raw) in contents.lines().enumerate() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -146,6 +147,22 @@ fn matches_go_verifier_decisions() {
         }
         let line: CorpusLine = serde_json::from_str(raw)
             .unwrap_or_else(|err| panic!("parse corpus line {}: {err}", index + 1));
+
+        let expected_prefix_boundary_result = match line.name.as_str() {
+            "valid_prefix_exact" | "valid_prefix_child_get" | "valid_prefix_child_head" => {
+                Some(true)
+            }
+            "prefix_policy_adjacent_sibling_denied" => Some(false),
+            _ => None,
+        };
+        if let Some(expected) = expected_prefix_boundary_result {
+            assert_eq!(
+                line.allowed, expected,
+                "case {:?}: Go corpus violates the prefix-boundary contract",
+                line.name,
+            );
+            prefix_boundary_count += 1;
+        }
 
         let result = verifier.verify(
             &line.method,
@@ -170,5 +187,9 @@ fn matches_go_verifier_decisions() {
     assert!(
         count >= 150,
         "expected at least 150 corpus cases, got {count}"
+    );
+    assert_eq!(
+        prefix_boundary_count, 4,
+        "expected exact, child GET/HEAD, and adjacent-sibling prefix-boundary cases"
     );
 }

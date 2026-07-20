@@ -154,11 +154,11 @@ func fixedCredentials() []verifier.Credential {
 			AllowedMethods: []string{"GET"},
 		},
 		{
-			// Prefix-restricted to /public-bucket/.
+			// Prefix-restricted to /public-bucket/public without a trailing slash.
 			AccessKey:       keyPrefix,
 			SecretKey:       secretPrefix,
 			Enabled:         true,
-			AllowedPrefixes: []string{"/public-bucket/"},
+			AllowedPrefixes: []string{"/public-bucket/public"},
 		},
 		{
 			// Short max expiry (60s).
@@ -301,7 +301,22 @@ func (g *generator) validCases() error {
 	}
 	g.emit("valid_method_restricted_get", "GET", p.uri, p.host, p.signTime.Unix())
 
-	// Prefix-restricted credential inside its allowed prefix.
+	// Prefix-restricted credential on the exact allowed path.
+	p, err = g.presign(presignSpec{
+		accessKey: keyPrefix,
+		secretKey: secretPrefix,
+		host:      hostAssets,
+		method:    "GET",
+		bucket:    "public-bucket",
+		object:    "public",
+		expiry:    5 * time.Minute,
+	})
+	if err != nil {
+		return err
+	}
+	g.emit("valid_prefix_exact", "GET", p.uri, p.host, p.signTime.Unix())
+
+	// Prefix-restricted credential below its allowed path.
 	for _, method := range []string{"GET", "HEAD"} {
 		p, err := g.presign(presignSpec{
 			accessKey: keyPrefix,
@@ -309,13 +324,13 @@ func (g *generator) validCases() error {
 			host:      hostAssets,
 			method:    method,
 			bucket:    "public-bucket",
-			object:    "report.pdf",
+			object:    "public/report.pdf",
 			expiry:    5 * time.Minute,
 		})
 		if err != nil {
 			return err
 		}
-		g.emit("valid_prefix_ok_"+strings.ToLower(method), method, p.uri, p.host, p.signTime.Unix())
+		g.emit("valid_prefix_child_"+strings.ToLower(method), method, p.uri, p.host, p.signTime.Unix())
 	}
 
 	// Short-expiry credential within its max.
@@ -445,6 +460,22 @@ func (g *generator) credentialAndPolicyCases() error {
 		return err
 	}
 	g.emit("prefix_policy_denied", "GET", p.uri, p.host, p.signTime.Unix())
+
+	// Prefix boundary denial: the request is validly signed for an adjacent
+	// sibling whose name only lexically starts with the configured prefix.
+	p, err = g.presign(presignSpec{
+		accessKey: keyPrefix,
+		secretKey: secretPrefix,
+		host:      hostAssets,
+		method:    "GET",
+		bucket:    "public-bucket",
+		object:    "publicity/secret",
+		expiry:    5 * time.Minute,
+	})
+	if err != nil {
+		return err
+	}
+	g.emit("prefix_policy_adjacent_sibling_denied", "GET", p.uri, p.host, p.signTime.Unix())
 
 	// Expiry over the credential's max (short-exp credential, 120s > 60s).
 	p, err = g.presign(presignSpec{

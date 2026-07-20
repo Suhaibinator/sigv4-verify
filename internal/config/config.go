@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -183,7 +185,15 @@ func rawFromEnv() rawConfig {
 func parseConfigFile(path string, data []byte, raw *rawConfig) error {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".json":
-		if err := json.Unmarshal(data, raw); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(raw); err != nil {
+			return fmt.Errorf("parse json config: %w", err)
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return errors.New("parse json config: multiple JSON values")
+			}
 			return fmt.Errorf("parse json config: %w", err)
 		}
 		return nil

@@ -243,6 +243,47 @@ func TestVerifierRejectsCredentialAndPolicyDenials(t *testing.T) {
 	})
 }
 
+func TestVerifierEnforcesPathPrefixBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		prefix  string
+		path    string
+		allowed bool
+	}{
+		{name: "exact path", prefix: "/bucket/public", path: "/bucket/public", allowed: true},
+		{name: "slash-delimited descendant", prefix: "/bucket/public", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "trailing-slash prefix", prefix: "/bucket/public/", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "root prefix", prefix: "/", path: "/bucket/public/file.jpg", allowed: true},
+		{name: "adjacent name", prefix: "/bucket/public", path: "/bucket/publicity/secret.jpg", allowed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := newTestVerifier(t, Credential{
+				AccessKey:       testAccessKey,
+				SecretKey:       testSecretKey,
+				Enabled:         true,
+				MaxExpires:      time.Hour,
+				AllowedHosts:    []string{testHost},
+				AllowedMethods:  []string{"GET", "HEAD"},
+				AllowedPrefixes: []string{tt.prefix},
+			})
+			rawURI := presignedURI(t, presignInput{
+				Method: "GET",
+				Path:   tt.path,
+				Host:   testHost,
+			})
+
+			result := v.Verify("GET", rawURI, testHost, "https", testNow)
+			if tt.allowed {
+				requireAllowed(t, result, tt.path)
+			} else {
+				requireDenied(t, result, ReasonUnauthorized)
+			}
+		})
+	}
+}
+
 func TestVerifierRejectsExpiredFutureDatedAndOverMaxExpires(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		v := newTestVerifier(t)

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -84,6 +85,59 @@ credentials:
 	}
 	if cred.MaxExpires != 10*time.Minute {
 		t.Fatalf("max expires = %s", cred.MaxExpires)
+	}
+}
+
+func TestLoadJSONConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	data := []byte(`{
+  "credentials": [
+    {
+      "access_key": "reader",
+      "secret_key": "secret",
+      "allowed_prefixes": ["/bucket/public/"]
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Credentials) != 1 {
+		t.Fatalf("credentials len = %d", len(cfg.Credentials))
+	}
+	if prefixes := cfg.Credentials[0].AllowedPrefixes; len(prefixes) != 1 || prefixes[0] != "/bucket/public/" {
+		t.Fatalf("allowed prefixes = %q", prefixes)
+	}
+}
+
+func TestLoadJSONConfigRejectsUnknownPolicyField(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	data := []byte(`{
+  "credentials": [
+    {
+      "access_key": "reader",
+      "secret_key": "secret",
+      "allowed_prefix": "/bucket/public/"
+    }
+  ]
+}`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("Load() error = nil, want unknown field error")
+	}
+	if !strings.Contains(err.Error(), `unknown field "allowed_prefix"`) {
+		t.Fatalf("Load() error = %q, want unknown field error", err)
 	}
 }
 

@@ -208,6 +208,55 @@ fn rejects_credential_and_policy_denials() {
 }
 
 #[test]
+fn enforces_path_prefix_segment_boundaries() {
+    let cases = [
+        (b"/bucket/public".as_slice(), "/bucket/public", true),
+        (
+            b"/bucket/public".as_slice(),
+            "/bucket/public/file.jpg",
+            true,
+        ),
+        (
+            b"/bucket/public".as_slice(),
+            "/bucket/publicity/secret",
+            false,
+        ),
+        (
+            b"/bucket/public".as_slice(),
+            "/bucket/public-old/secret",
+            false,
+        ),
+        (
+            b"/bucket/public/".as_slice(),
+            "/bucket/public/file.jpg",
+            true,
+        ),
+        (b"/".as_slice(), "/bucket/publicity/secret", true),
+    ];
+
+    for (prefix, path, want_allowed) in cases {
+        let mut prefix_limited = test_credential();
+        prefix_limited.allowed_prefixes = vec![prefix.to_vec()];
+        let raw_uri = presigned_uri(PresignInput {
+            path,
+            ..PresignInput::default()
+        });
+        let result = new_test_verifier(vec![prefix_limited]).verify(
+            "GET",
+            raw_uri.as_bytes(),
+            TEST_HOST,
+            test_now(),
+        );
+
+        if want_allowed {
+            require_allowed(result, path.as_bytes());
+        } else {
+            require_denied(result, REASON_UNAUTHORIZED);
+        }
+    }
+}
+
+#[test]
 fn rejects_expired_future_dated_and_over_max_expiry() {
     let verifier = new_test_verifier(vec![]);
 

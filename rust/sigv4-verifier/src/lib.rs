@@ -1032,8 +1032,14 @@ impl CompiledCredential {
             || self
                 .allowed_prefixes
                 .iter()
-                .any(|prefix| path.starts_with(prefix))
+                .any(|prefix| path_matches_prefix(path, prefix))
     }
+}
+
+fn path_matches_prefix(path: &[u8], prefix: &[u8]) -> bool {
+    path.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.is_empty() || prefix.ends_with(b"/") || suffix.starts_with(b"/")
+    })
 }
 
 fn sha256(data: &[u8]) -> [u8; digest::SHA256_OUTPUT_LEN] {
