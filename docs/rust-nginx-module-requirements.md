@@ -142,7 +142,7 @@ http {
             sigv4_verify on;
             proxy_pass http://minio_origin;
             proxy_cache s3_assets;
-            proxy_cache_key "$scheme://$host$uri";
+            proxy_cache_key "$scheme://$host$request_uri";
         }
     }
 }
