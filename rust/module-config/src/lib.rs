@@ -7,8 +7,8 @@
 //! Policy-list semantics are explicit: a credential must either list
 //! allowed hosts/prefixes or opt out with `allow_any_host`/`allow_any_prefix`,
 //! and must either list allowed methods or opt in to the module-wide
-//! supported methods with `allow_default_methods`. This is stricter than the
-//! Go sidecar, where an omitted list means "allow all".
+//! supported methods with `allow_default_methods`. An omitted policy choice is
+//! a configuration error.
 
 use std::fmt;
 use std::fs;

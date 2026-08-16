@@ -1,20 +1,19 @@
 # Benchmarks
 
-This document covers how to run the benchmarks for the Rust SigV4 verifier core
-and the NGINX module e2e path, the acceptance targets from
-`docs/rust-nginx-module-requirements.md`, and the core-verifier results measured
-so far.
+This document covers the Rust SigV4 verifier core and NGINX module benchmarks.
+The Go figures below are retained only as historical measurements that motivated
+removing the former implementation; the repository no longer builds or ships it.
 
 ## What is benchmarked
 
-Two layers, matching the requirements doc:
+Two layers are measured:
 
 1. **Core verifier (criterion).** Measures `Verifier::verify()` in isolation on
    pre-generated URIs, with no NGINX, no I/O, and no network. This isolates the
    Rust hot path and is where allocations-per-request are reported.
 2. **NGINX module e2e (load harness).** Drives a running NGINX endpoint with a
    mixed valid/invalid corpus and reports wire latency percentiles and
-   throughput. This is where the module is compared against the Go sidecar.
+   throughput and comparison with an unverified NGINX baseline.
 
 ## Running the core benchmark
 
@@ -52,44 +51,29 @@ missing-params scenarios.
 ## Running the e2e harness
 
 The load harness lives in `scripts/bench/` and measures a *running* endpoint; it
-does not stand up NGINX or the sidecar for you. See `scripts/bench/README.md`
-for the full matrix (Rust module static + proxy_cache, Go sidecar unix socket +
-TCP, mixed traffic, high-cardinality, long paths, reload churn) and reuse the
-container topology in `e2e/nginx_unix_socket_test.go`.
+does not stand up NGINX or generate signed URLs. See `scripts/bench/README.md`
+for the request-file format and benchmark matrix.
 
 ```sh
-# 1. Generate a mixed valid/invalid corpus.
-scripts/bench/gen-urls.sh -n 500 -o /tmp/urls.txt \
-  --host assets.example.test --bucket my-bucket --object public/file.txt \
-  --invalid-ratio 0.2
-
-# 2. Load-test a running endpoint (wrk primary, oha fallback).
+# Load-test a running endpoint with a pre-generated signed request corpus.
 scripts/bench/bench.sh --base http://127.0.0.1:8080 --urls /tmp/urls.txt \
   --host assets.example.test --duration 30s --connections 64 --threads 4
 ```
 
-## Acceptance targets
+## Evaluation targets
 
-From `docs/rust-nginx-module-requirements.md` (Performance Requirements). These
-apply to the **NGINX e2e** comparison, not the core-only bench:
-
-- Native module p50 verification latency **≥30% lower** than the Go sidecar over
-  a unix socket in the same NGINX e2e setup.
-- Native module p99 verification latency **≥20% lower** than the Go sidecar over
-  a unix socket in the same NGINX e2e setup.
-- No measurable throughput regression for cached object hits with verification
-  enabled.
-- Stable memory usage under sustained load and reload churn.
+- Keep verification overhead small relative to an equivalent unverified NGINX
+  baseline.
+- Avoid a material cached-hit throughput regression.
+- Keep memory stable under sustained load and reload churn.
 
 Report p50/p90/p99/p999 latency, RPS per worker, CPU per request, allocations
 per request (core bench), worker RSS, and the error/deny-reason distribution.
 
 ## Results (Apple Silicon, core-only)
 
-Core-verifier-only. These are **not** the NGINX e2e numbers and are not directly
-comparable to the Go sidecar — the acceptance targets above are defined against
-the NGINX e2e path, which is measured on Linux (TBD). They characterize the Rust
-hot path and its per-request allocations.
+Core-verifier-only. These are **not** NGINX e2e numbers; they characterize the
+Rust hot path and its per-request allocations.
 
 - Machine: Apple M4 Max (16 cores), macOS 26.5.2.
 - Toolchain: rustc 1.96.0, `--release`/bench profile (`panic = "abort"`).
@@ -144,8 +128,8 @@ params vector, the slow-path re-encode of the credential value (it contains
 Full NGINX-path comparison, re-measured 2026-07-02 with the module image
 rebuilt from the alloc-reduced verifier (the original 2026-07-01 pass produced
 the same stack-to-stack deltas within noise, as expected — the e2e numbers are
-dominated by wire latency, not the µs-scale core path). Topology
-mirrors the e2e tests: the module image (`build/nginx-module/Dockerfile`,
+dominated by wire latency, not the µs-scale core path). The retired comparison
+used the module image (`build/nginx-module/Dockerfile`,
 nginx 1.28.0 + module, enforce mode) versus the Go sidecar over a unix socket
 behind `auth_request` (official `nginx:1.28.0`, `keepalive 16` upstream),
 versus the same nginx serving the same file with no verification. One nginx
@@ -166,10 +150,8 @@ Verification overhead relative to the unverified baseline:
 | Rust module | +0.1 ms      | +0.2 ms      | +0.2 ms      | −2.8%           |
 | Go sidecar  | +0.9 ms      | +1.3 ms      | +1.6 ms      | −12.8%          |
 
-Against the acceptance targets (verification latency vs the sidecar): the
-module's added verification latency is ~85–90% lower than the sidecar's at
-both p50 (+0.1 ms vs +0.9 ms) and p99 (+0.2 ms vs +1.6 ms) — comfortably past
-the ≥30%/≥20% reduction targets in this setup.
+The module's added verification latency was ~85–90% lower than the former
+implementation at both p50 (+0.1 ms vs +0.9 ms) and p99 (+0.2 ms vs +1.6 ms).
 
 Caveats: run under the Docker Desktop VM on macOS (its port forwarding
 dominates the ~6.7 ms absolute baseline), single hot URL, 20 s windows.
@@ -236,6 +218,6 @@ substantially, so this is a default-tuning artifact, not an inherent floor. The
 Rust module has no GC; its ~9 allocations/request are deterministic heap
 operations, visible in its flatter distribution (p99 only 1.3× p50).
 
-Same caveats as above: Docker Desktop VM on macOS, one nginx worker per
-stack; re-run on Linux for production sign-off. Regenerate the corpus and
-rerun with `scripts/bench/gen-urls.sh` + `scripts/bench/bench.sh`.
+Same caveats as above: Docker Desktop VM on macOS, one nginx worker per stack;
+re-run on Linux for production sign-off using a fixed signed corpus and
+`scripts/bench/bench.sh`.

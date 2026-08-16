@@ -134,12 +134,16 @@ Observability variables: `$sigv4_verify_result` (`allow|deny|error|off|shadow`),
 `$sigv4_verify_reason`, `$sigv4_verify_access_key_hash`,
 `$sigv4_verify_latency_us`.
 
-## Tests
+## Validation
 
-The e2e suite (`e2e/nginx_module_test.go`, build tag `e2e`) builds this image
-and exercises the enforce/shadow/off matrix, `nginx -t` validation, and a
-credential reload:
+Build the image, mount a configuration and secret, and ask the packaged NGINX
+binary to validate them:
 
 ```sh
-go test -tags e2e -run TestNginxModuleE2E -timeout 30m ./e2e/
+docker build -f build/nginx-module/Dockerfile \
+  -t sigv4-verify-nginx:1.28.0 .
+docker run --rm \
+  -v "$PWD/examples/nginx.conf:/etc/nginx/nginx.conf:ro" \
+  -v "$PWD/secret:/run/secrets/sigv4:ro" \
+  sigv4-verify-nginx:1.28.0 nginx -t
 ```
