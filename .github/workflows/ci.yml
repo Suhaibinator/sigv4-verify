@@ -8,34 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  go:
-    name: Go
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.4"
-          check-latest: true
-          cache: true
-
-      - name: Test
-        run: go test ./...
-
-      - name: Race test
-        run: go test -race ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        run: go build ./cmd/sigv4-verify
-
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -140,22 +112,3 @@ jobs:
           tags: sigv4-verify-nginx-module:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  e2e:
-    name: NGINX Transport E2E
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.4"
-          check-latest: true
-          cache: true
-
-      - name: Run NGINX transport e2e
-        run: go test -tags=e2e ./e2e -run 'TestNginx.*E2E' -count=1 -v

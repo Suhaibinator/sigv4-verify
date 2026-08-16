@@ -1,71 +1,45 @@
-# NGINX e2e benchmark harness
+# NGINX benchmark harness
 
 These scripts drive an HTTP load test against a running NGINX endpoint and
-report latency percentiles and throughput. They are the e2e counterpart to the
-core-only criterion benchmark in `rust/sigv4-verifier/benches/verify.rs`.
+report latency percentiles and throughput. They complement the core Criterion
+benchmark in `rust/sigv4-verifier/benches/verify.rs`.
 
-The harness only generates traffic and measures a running endpoint. It does not
-stand up NGINX, the Rust module, or the Go sidecar for you — bring your own
-endpoint (see `e2e/nginx_unix_socket_test.go` for how the sidecar/NGINX
-containers are wired together, and reuse that topology for benchmarking).
+The harness measures an endpoint; it does not start NGINX or create presigned
+URLs. Build the module image, configure NGINX from `examples/nginx.conf`, and
+generate presigned URLs with the S3/MinIO client used by your deployment.
 
-## Files
+## Input format
 
-- `gen-urls.sh` — produce a file of request lines (`METHOD /path?query`) from
-  `./cmd/presign-url`, mixing valid and signature-tampered URLs.
-- `multi-url.lua` — wrk script that replays a request-line file round-robin and
-  prints p50/p90/p99/p99.9 latency.
-- `bench.sh` — run wrk (primary) or oha (fallback) against a base URL and a
-  request-line file.
+Create a UTF-8 request file with one method and request URI per line:
 
-## The benchmark matrix
+```text
+GET /my-bucket/public/file.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&...
+HEAD /my-bucket/public/report.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&...
+```
 
-The requirements doc calls for these cells. Stand each server config up
-separately, point the harness at it, and compare:
+The request URI must contain the signed path and complete query string, but not
+the scheme or host. Include a stable mix of valid, expired, tampered, unknown-key,
+and policy-denied requests when measuring adversarial traffic. Never commit live
+credentials or unexpired production URLs.
 
-| Target                                | How to stand it up |
-| ------------------------------------- | ------------------ |
-| Rust module, static-file cache hits   | NGINX + module, `root`/`try_files` serving a cached static origin |
-| Rust module, proxy + `proxy_cache`    | NGINX + module, `proxy_pass` to an origin with `proxy_cache` warm |
-| Go sidecar over unix socket           | NGINX `auth_request` → sidecar on a unix socket (baseline) |
-| Go sidecar over TCP                   | NGINX `auth_request` → sidecar on TCP (baseline) |
+## Benchmark matrix
 
-Run each target against the same traffic profiles:
+Measure each topology against the same corpus:
 
-- **Mixed valid/invalid** — `gen-urls.sh --invalid-ratio 0.2` (default).
-- **High-cardinality query strings** — see the note below; the valid-signature
-  form of this is measured by the core criterion bench
-  (`valid_get_high_cardinality_query`).
-- **Long paths** — `gen-urls.sh --object "$(long key near the URI limit)"`.
-- **Reload churn under load** — run `bench.sh` while issuing `nginx -s reload`
-  (or the module's credential swap) on an interval in another shell.
+| Target | Configuration |
+| --- | --- |
+| Unverified baseline | NGINX serving the same origin with verification disabled. |
+| Rust module, static files | Module in enforce mode before `root`/`try_files`. |
+| Rust module, proxy cache | Module in enforce mode before a warm `proxy_cache`. |
 
-Report per the requirements: p50/p90/p99/p999 latency, RPS per worker, CPU per
-request, worker RSS, and the deny-reason distribution. wrk gives you the
-percentiles and RPS directly; capture CPU/RSS with `pidstat`/`docker stats` on
-the NGINX worker, and the deny-reason distribution from the module's NGINX log
-variables (or the sidecar's `/metrics`).
-
-### Acceptance targets
-
-From the requirements doc, the native module must beat the Go sidecar over a
-unix socket by **≥30% at p50** and **≥20% at p99** in the same NGINX e2e setup,
-with no throughput regression on cached hits and stable memory under load.
+Use traffic profiles that cover a hot valid URL, mixed valid/invalid requests,
+high-cardinality query strings, long paths near configured URI limits, and
+reload churn. Record p50/p90/p99/p99.9 latency, requests per second per worker,
+CPU per request, worker RSS, and deny-reason distribution.
 
 ## Usage
 
-Generate a mixed corpus (20% tampered signatures by default):
-
-```sh
-scripts/bench/gen-urls.sh \
-  -n 500 -o /tmp/urls.txt \
-  --host assets.example.test \
-  --access-key e2e-access-key --secret-key e2e-secret-key \
-  --bucket my-bucket --object public/file.txt \
-  --invalid-ratio 0.2
-```
-
-Run the load test (wrk primary):
+Run the load test with `wrk`:
 
 ```sh
 scripts/bench/bench.sh \
@@ -75,18 +49,11 @@ scripts/bench/bench.sh \
   --duration 30s --connections 64 --threads 4
 ```
 
-## High-cardinality note
+`multi-url.lua` replays the request file round-robin and reports
+p50/p90/p99/p99.9 latency. If `wrk` is unavailable, `bench.sh` can use `oha` as
+a single-request fallback.
 
-`cmd/presign-url` only signs the SigV4 parameters (plus optional
-`response-content-*`), so it cannot emit *valid* URLs carrying 20 extra
-high-cardinality query params: those params would have to be part of the signed
-canonical query. The core criterion bench covers the valid high-cardinality
-case directly. For the e2e path, use high-cardinality corpora to exercise the
-deny path, or extend the generator to sign extra params if you need valid
-high-cardinality e2e traffic.
+## Load generators
 
-## Installing a load generator
-
-- wrk: <https://github.com/wg/wrk> (recommended; supports the lua replay and
-  p99.9).
-- oha: <https://github.com/hatoo/oha> (single-URL fallback only).
+- wrk: <https://github.com/wg/wrk> (recommended for mixed-corpus replay).
+- oha: <https://github.com/hatoo/oha> (single-request fallback only).

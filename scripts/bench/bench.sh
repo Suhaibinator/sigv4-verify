@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # bench.sh — drive an HTTP load test against a running NGINX endpoint using a
-# pre-generated file of request lines (see gen-urls.sh) and report p50/p90/p99/
+# pre-generated file of signed request lines and report p50/p90/p99/
 # p99.9 latency plus throughput.
 #
 # Primary driver is wrk with multi-url.lua, which replays the mixed valid/

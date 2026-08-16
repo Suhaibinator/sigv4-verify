@@ -1,17 +1,11 @@
 # Rust NGINX Module: `ngx_http_sigv4_verify_module`
 
 Operator guide for the native NGINX module that verifies S3/MinIO SigV4
-presigned `GET`/`HEAD` URLs in the NGINX access phase, without the Go sidecar's
-`auth_request` hop.
-
-The Go sidecar (see the [top-level README](../README.md)) remains the reference
-implementation and the supported rollback path. This module is a
-performance-oriented follow-up that keeps the same fail-closed security model.
+presigned `GET`/`HEAD` URLs directly in the NGINX access phase.
 
 > Status: production evaluation. The module is feature-complete against the
 > supported SigV4 envelope, but it should be rolled out through shadow mode
-> before enforce mode. See [Rollout](#rollout) and the
-> [requirements' acceptance criteria](rust-nginx-module-requirements.md#acceptance-criteria).
+> before enforce mode. See [Shadow-mode rollout](#shadow-mode-rollout).
 
 ## Contents
 
@@ -20,14 +14,13 @@ performance-oriented follow-up that keeps the same fail-closed security model.
 - [Building the module](#building-the-module)
 - [Directive reference](#directive-reference)
 - [Variables and logging](#variables-and-logging)
-- [Policy semantics vs. the Go sidecar](#policy-semantics-vs-the-go-sidecar)
+- [Policy semantics](#policy-semantics)
 - [Shadow-mode rollout](#shadow-mode-rollout)
 - [Observability](#observability)
 - [Security notes](#security-notes)
 - [Supported versions, platforms, and ABI](#supported-versions-platforms-and-abi)
 - [FIPS considerations](#fips-considerations)
-- [Rollback to the Go sidecar](#rollback-to-the-go-sidecar)
-- [Semantic differences from the Go sidecar](#semantic-differences-from-the-go-sidecar)
+- [Disabling or removing the module](#disabling-or-removing-the-module)
 
 ## Overview and architecture
 
@@ -64,8 +57,8 @@ The codebase is split so that all `unsafe` is confined to a thin FFI layer:
 
 ## Supported SigV4 envelope
 
-The module verifies the same narrow envelope as the Go sidecar MVP. Anything
-outside it is denied.
+The module intentionally supports a narrow SigV4 envelope. Anything outside it
+is denied.
 
 - Query-string presigned authentication only (no header-based authorization).
 - Original methods `GET` and `HEAD` only.
@@ -261,8 +254,7 @@ Other arguments:
 
 Each of the three policy dimensions (host, method, prefix) **must** be specified
 either as an explicit list or with its `allow_*` flag. Omitting both fails
-`nginx -t`. This is the key difference from the Go sidecar; see
-[Policy semantics](#policy-semantics-vs-the-go-sidecar).
+`nginx -t`; see [Policy semantics](#policy-semantics).
 
 Duplicate access keys across `sigv4_verify_credential` directives fail
 `nginx -t`.
@@ -332,8 +324,7 @@ In shadow mode `$sigv4_verify_result` is always `shadow`, while
 
 ### Reason strings
 
-These match the Go sidecar's stable reason strings so log pipelines can be
-shared:
+The module emits these stable reason strings:
 
 `ok`, `missing_metadata`, `invalid_uri`, `unsupported_method`,
 `missing_query_param`, `unsupported_algorithm`, `invalid_credential_scope`,
@@ -343,7 +334,7 @@ shared:
 `unauthorized` covers a disabled credential and host/method/prefix policy
 denials (the module does not emit a distinct reason per policy dimension).
 
-Two reasons are module-only, with no Go-sidecar equivalent:
+Two reasons cover module integration failures:
 
 - `internal_error` — a Rust panic was caught at the FFI boundary (returns 500).
 - `not_configured` — verification was enabled but no compiled verifier exists
@@ -359,60 +350,35 @@ sigv4_verify: result=<r> reason=<reason> access_key_hash=<hash|-> method=<m> hos
 
 The raw query string is **never** logged because it carries the signature.
 
-## Policy semantics vs. the Go sidecar
+## Policy semantics
 
-This is the single most important behavioral difference to understand before
-migrating.
+The safe verifier core represents an empty allowed-host, method, or prefix list
+as unrestricted for that dimension. The NGINX configuration layer will not
+produce an empty list accidentally: every dimension must use explicit
+`allowed_*` entries or its `allow_any_*` / `allow_default_methods` flag. A
+missing choice fails `nginx -t`.
 
-The Rust **verifier core** treats an empty policy list the same way the Go
-sidecar does: an empty allowed-host/method/prefix set means "allow any." The
-difference is at the **configuration layer**: the Rust
-`sigv4_verify_credential` directive refuses to *produce* an empty list unless
-you explicitly opt in with `allow_any_host` / `allow_default_methods` /
-`allow_any_prefix`. In the Go sidecar, simply omitting a list in YAML yields an
-empty list, which means allow-all (fail-open by default).
-
-Migration mapping:
-
-| Go sidecar credential (YAML) | Rust module credential (directive) |
-| --- | --- |
-| `allowed_hosts: [assets.example.com]` | `allowed_host=assets.example.com` |
-| `allowed_hosts` omitted (allows any host) | `allow_any_host` (must be explicit) |
-| `allowed_methods: [GET, HEAD]` | `allowed_method=GET allowed_method=HEAD` |
-| `allowed_methods` omitted (allows GET/HEAD) | `allow_default_methods` (must be explicit) |
-| `allowed_prefixes: [/bucket/pub/]` | `allowed_prefix=/bucket/pub/` |
-| `allowed_prefixes` omitted (allows any path) | `allow_any_prefix` (must be explicit) |
-| `secret_key_file: /run/secrets/x` | `secret_key_file=/run/secrets/x` |
-| `secret_key_env: SIGV4_SECRET_KEY` | no equivalent — use `secret_key_file=` (or `secret_key=` for dev) |
-| `enabled: false` | `enabled=off` |
-| `max_expires: 10m` | `max_expires=10m` |
-
-Practical rule: when porting a Go credential that omitted a policy list, decide
-deliberately whether you want the corresponding `allow_any_*` /
-`allow_default_methods` flag. If you do not, the config will not load until you
-add either the flag or an explicit list — by design.
+Use the allow-any flags sparingly. Explicit lists make the authorization
+boundary visible in the deployed configuration and reduce the impact of a
+leaked signing key.
 
 ## Shadow-mode rollout
 
 Shadow mode verifies and records outcomes without changing request results, so
-you can validate compatibility and measure latency before enforcing. This
-mirrors the [requirements' rollout plan](rust-nginx-module-requirements.md#rollout-requirements):
+you can validate policy and measure latency before enforcing:
 
 1. Build the module against the production NGINX version (see [Building](#building-the-module)).
 2. Deploy the module with `load_module` and `sigv4_verify shadow;` on the target
-   locations, alongside the existing Go sidecar `auth_request` path.
+   locations.
 3. Confirm `nginx -t` passes and reload.
 4. Watch `$sigv4_verify_result` / `$sigv4_verify_reason` in access logs. In
    shadow mode every request is still allowed.
-5. Compare the module's `reason` values against the Go sidecar's decisions for
-   the same traffic. Investigate any request the module would deny that the
-   sidecar allows (or vice versa).
-6. Roll shadow mode out to a small production traffic slice, then wider.
-7. Confirm latency/CPU using `$sigv4_verify_latency_us` and worker metrics.
-8. Switch a canary location to `sigv4_verify on;` (enforce). Denials now return
+5. Investigate unexpected deny reasons against the signing configuration and
+   credential policy.
+6. Confirm latency/CPU using `$sigv4_verify_latency_us` and worker metrics.
+7. Switch a canary location to `sigv4_verify on;` (enforce). Denials now return
    `403`.
-9. Expand enforce mode gradually across locations and hosts.
-10. Keep the Go sidecar deployment available for rollback throughout.
+8. Expand enforce mode gradually across locations and hosts.
 
 ## Observability
 
@@ -474,49 +440,13 @@ primitives, but they are **not FIPS-validated**. Deployments that require
 FIPS-mode alignment would need an OpenSSL-backed crypto variant of the verifier
 core; that is future work and not available in this build.
 
-## Rollback to the Go sidecar
+## Disabling or removing the module
 
-Rollback does not require rebuilding anything:
+To stop enforcing while investigating an operational issue, set
+`sigv4_verify off;` for the affected locations, run `nginx -t`, and reload.
+This removes SigV4 authorization from those locations, so use it only when
+another trusted control protects the content.
 
-1. Remove (or set to `off`) the `sigv4_verify` directives on the affected
-   locations, and remove the `load_module` line for the module.
-2. Restore the Go sidecar `auth_request` configuration (the
-   [`examples/nginx.conf`](../examples/nginx.conf) pattern) pointing at the
-   running sidecar.
-3. Run `nginx -t` and reload.
-
-Because the sidecar and the module verify the same envelope, presigned URLs that
-were valid under one are valid under the other (subject to the policy-semantics
-difference above), so no client-side change is needed.
-
-## Semantic differences from the Go sidecar
-
-Comparing `internal/config` + `internal/verifier` (Go) with `rust/module-config`
-+ `rust/sigv4-verifier` (Rust), the verifier cores are behaviorally equivalent
-for the supported envelope, including the same reason strings and the same
-empty-list "allow-all" semantics in the verification core. The differences are:
-
-1. **Policy-list configuration (most important).** The Rust directive parser
-   requires an explicit list or an `allow_any_*` / `allow_default_methods` flag
-   for each of host, method, and prefix. The Go sidecar treats an omitted list
-   as allow-all. See [Policy semantics](#policy-semantics-vs-the-go-sidecar).
-   Note the Go sidecar was hardened to reject inline (flow-style) YAML lists,
-   which were previously dropped silently and could fail open; the Rust module
-   avoids that class of footgun entirely by requiring explicit intent.
-2. **Secret sources.** The Go sidecar supports `secret_key`, `secret_key_file`,
-   and `secret_key_env` (environment). The Rust module supports
-   `secret_key_file=` (production) and `secret_key=` (dev only); there is no
-   environment-variable source, because NGINX environment inheritance is
-   explicit and easy to misconfigure.
-3. **Transport / integration.** The sidecar runs as a separate process reached
-   over TCP or a Unix socket via `auth_request`; the module runs in-process in
-   the NGINX access phase with no hop. It reads the raw request URI directly
-   rather than an `X-Original-URI` header.
-4. **Observability surface.** The sidecar exposes an HTTP `/metrics` endpoint;
-   the module exposes NGINX variables and logs only, plus two module-only reason
-   strings (`internal_error`, `not_configured`) for FFI-boundary panics and the
-   fail-closed unconfigured path.
-
-The set of accepted presigned URLs is otherwise the same, so a URL that verifies
-against the sidecar verifies against the module when the credential policy is
-configured equivalently.
+To uninstall the module, remove all `sigv4_verify_*` directives and the
+`load_module` line, validate the resulting configuration with `nginx -t`, and
+reload NGINX.

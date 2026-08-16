@@ -1,6 +1,6 @@
 -- multi-url.lua — wrk script that replays a file of request lines round-robin.
 --
--- Each line of URLS_FILE is "METHOD /path?query" (as produced by gen-urls.sh);
+-- Each line of URLS_FILE is "METHOD /path?query";
 -- a bare "/path?query" defaults to GET. The Host header is taken from
 -- BENCH_HOST so requests route to the correct NGINX server block.
 --
