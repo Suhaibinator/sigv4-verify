@@ -19,24 +19,26 @@ instead of 1028000 in …
 To keep this safe and explicit, the image:
 
 - Builds the module against the exact pinned NGINX source
-  (`ARG NGINX_VERSION`, default `1.28.0`) configured with **`--with-compat`**.
-- Ships the module inside the official **`nginx:${NGINX_VERSION}`** image, which
-  is itself built with `--with-compat`.
+  (`ARG NGINX_VERSION`, default `1.31.3`) configured with **`--with-compat`**.
+- Ships the module inside the official
+  **`nginx:${NGINX_VERSION}-trixie`** image, which is itself built with
+  `--with-compat`.
 
-`NGINX_VERSION` **must** match the runtime image tag exactly. `--with-compat`
-is what makes a module built out-of-tree loadable by the distributed nginx
-binary; both sides must have it. If you bump `NGINX_VERSION`, update
-`NGINX_SHA256` to match the new tarball (see "Pinning" below).
+`NGINX_VERSION` **must** match the version component of the runtime image tag.
+`--with-compat` is what makes a module built out-of-tree loadable by the
+distributed nginx binary; both sides must have it. If you bump
+`NGINX_VERSION`, update `NGINX_SHA256` to match the new tarball (see "Pinning"
+below).
 
 ## What gets pinned
 
 | Thing | Pin | Where |
 | --- | --- | --- |
-| NGINX version | `1.28.0` | `ARG NGINX_VERSION` + runtime `FROM nginx:${NGINX_VERSION}` |
-| NGINX source checksum | `sha256:c6b5c6b0…ff76a` | `ARG NGINX_SHA256`, verified with `sha256sum -c` |
-| Rust toolchain | `1.96.0` | `ARG RUST_IMAGE=rust:1.96.0-slim-bookworm` and `rust-toolchain.toml` |
+| NGINX version | `1.31.3` | `ARG NGINX_VERSION` + runtime `FROM nginx:${NGINX_VERSION}-trixie` |
+| NGINX source checksum | `sha256:a7657c50…dd525` | `ARG NGINX_SHA256`, verified with `sha256sum -c` |
+| Rust toolchain | `1.97.1` | `ARG RUST_IMAGE=rust:1.97.1-slim-trixie` and `rust-toolchain.toml` |
 | Crate versions | `Cargo.lock` | copied into the build stage; `cargo build` uses it |
-| Base OS | Debian `bookworm` | both stages, so the module's glibc matches the runtime |
+| Base OS | Debian `trixie` | both stages, so the module's glibc matches the runtime |
 | Target architecture | build host arch | native build, no `--target`; works on `linux/amd64` and `linux/arm64` |
 
 The crypto stack is pinned transitively through `Cargo.lock`: the
@@ -51,7 +53,7 @@ Dockerfile copies `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, and
 `rust/`):
 
 ```sh
-docker build -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.28.0 .
+docker build -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.31.3 .
 ```
 
 Cross/multi-arch (module is arch-agnostic in the Dockerfile; buildx picks the
@@ -59,7 +61,7 @@ platform):
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.28.0 .
+  -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.31.3 .
 ```
 
 The build downloads the NGINX source tarball and the Rust crate dependencies,
@@ -74,7 +76,7 @@ Provide your own `nginx.conf` that `load_module`s the module and a secret file:
 docker run --rm -p 8080:8080 \
   -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$PWD/secret:/run/secrets/sigv4:ro" \
-  sigv4-verify-nginx:1.28.0
+  sigv4-verify-nginx:1.31.3
 ```
 
 Minimal `nginx.conf`:
@@ -110,7 +112,7 @@ Validate a config without starting nginx:
 
 ```sh
 docker run --rm -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" \
-  sigv4-verify-nginx:1.28.0 nginx -t
+  sigv4-verify-nginx:1.31.3 nginx -t
 ```
 
 Invalid module configuration fails `nginx -t` (fail-closed at config time),
@@ -141,9 +143,9 @@ binary to validate them:
 
 ```sh
 docker build -f build/nginx-module/Dockerfile \
-  -t sigv4-verify-nginx:1.28.0 .
+  -t sigv4-verify-nginx:1.31.3 .
 docker run --rm \
   -v "$PWD/examples/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$PWD/secret:/run/secrets/sigv4:ro" \
-  sigv4-verify-nginx:1.28.0 nginx -t
+  sigv4-verify-nginx:1.31.3 nginx -t
 ```

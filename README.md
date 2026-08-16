@@ -30,7 +30,7 @@ return `500`; verification-disabled locations use normal NGINX handling.
 Build the pinned NGINX image and Rust module:
 
 ```sh
-docker build -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.28.0 .
+docker build -f build/nginx-module/Dockerfile -t sigv4-verify-nginx:1.31.3 .
 ```
 
 Create a secret file and an NGINX configuration based on
@@ -40,7 +40,7 @@ Create a secret file and an NGINX configuration based on
 docker run --rm -p 8080:8080 \
   -v "$PWD/examples/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$PWD/secret:/run/secrets/sigv4:ro" \
-  sigv4-verify-nginx:1.28.0
+  sigv4-verify-nginx:1.31.3
 ```
 
 Native NGINX modules are ABI-sensitive. Build the module against the same NGINX

@@ -77,7 +77,7 @@ The module is a dynamic module (`cdylib`). Two build modes are supported.
 
 ### Prerequisites
 
-- Rust toolchain pinned by `rust-toolchain.toml` (currently `1.96.0`).
+- Rust toolchain pinned by `rust-toolchain.toml` (currently `1.97.1`).
 - A C toolchain and `make`.
 - `libclang` (bindgen needs it to parse NGINX headers).
 - PCRE2, zlib, and OpenSSL development headers.
@@ -143,8 +143,8 @@ ABI-matching burden described below.
 ```sh
 docker build \
     -f build/nginx-module/Dockerfile \
-    --build-arg NGINX_VERSION=1.28.0 \
-    -t sigv4-verify-nginx-module:1.28.0 \
+    --build-arg NGINX_VERSION=1.31.3 \
+    -t sigv4-verify-nginx-module:1.31.3 \
     .
 ```
 

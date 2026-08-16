@@ -6,13 +6,13 @@
 # only loadable by an nginx binary built from the SAME source version with a
 # compatible configure option set. We build the module against nginx
 # ${NGINX_VERSION} configured with --with-compat and ship it in the official
-# nginx:${NGINX_VERSION} image, which is also built --with-compat. NGINX_VERSION
-# must match the runtime image tag exactly.
+# nginx:${NGINX_VERSION}-trixie image, which is also built --with-compat. The
+# NGINX_VERSION source version must match the version component of that tag.
 
-ARG NGINX_VERSION=1.28.0
-# Debian bookworm on both stages so the glibc the module links against matches
-# the runtime image (nginx:1.28.0 is debian:bookworm-slim based).
-ARG RUST_IMAGE=rust:1.96.0-slim-bookworm
+ARG NGINX_VERSION=1.31.3
+# Debian trixie on both stages so the glibc the module links against matches
+# the runtime image.
+ARG RUST_IMAGE=rust:1.97.1-slim-trixie
 
 # ---------------------------------------------------------------------------
 # Stage 1: build the module .so
@@ -21,7 +21,7 @@ FROM ${RUST_IMAGE} AS builder
 
 ARG NGINX_VERSION
 # sha256 of https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
-ARG NGINX_SHA256=c6b5c6b086c0df9d3ca3ff5e084c1d0ef909e6038279c71c1c3e985f576ff76a
+ARG NGINX_SHA256=a7657c50811c2d92d9895395e8b873ef60398142c4db21eb647811c38f6dd525
 
 # Build dependencies:
 #   make, gcc              - nginx ./configure + module compilation
@@ -61,12 +61,12 @@ ENV NGINX_SOURCE_DIR=/nginx
 WORKDIR /build
 
 # Pin the Rust toolchain exactly as the repo requires (rust-toolchain.toml
-# channel 1.96.0). Materialize it + its components in a cached layer before any
+# channel 1.97.1). Materialize it + its components in a cached layer before any
 # sources change. The explicit version matches the toolchain file; keep them in
 # sync.
 COPY rust-toolchain.toml ./
 RUN set -eux; \
-    rustup default 1.96.0; \
+    rustup default 1.97.1; \
     rustup component add rustfmt clippy
 
 # Copy the workspace manifests and the Rust crates the module needs.
@@ -86,7 +86,7 @@ RUN --mount=type=cache,target=/build/target,sharing=locked \
 # ---------------------------------------------------------------------------
 # Stage 2: runtime = official nginx + the module
 # ---------------------------------------------------------------------------
-FROM nginx:${NGINX_VERSION}
+FROM nginx:${NGINX_VERSION}-trixie
 
 # The runtime nginx is built --with-compat (official image), so this module
 # built against the same version loads cleanly via `load_module`.

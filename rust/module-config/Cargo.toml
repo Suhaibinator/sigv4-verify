@@ -9,4 +9,4 @@ publish = false
 
 [dependencies]
 sigv4-verifier = { path = "../sigv4-verifier" }
-zeroize = "1.8.2"
+zeroize = "1.9.0"
